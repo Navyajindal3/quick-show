@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
  * Uses app password for 2FA-enabled Gmail accounts.
  */
 const createTransporter = () => {
-  return nodemailer.createTransporter({
+  return nodemailer.createTransport({
     service: 'gmail',
     auth: {
       user: process.env.NODEMAILER_USER,
@@ -79,7 +79,7 @@ const sendBookingConfirmationEmail = async ({ to, userName, booking, qrCodeDataU
 
             <div style="text-align: center; margin: 20px 0;">
               <p style="color: #aaa;">Show this QR code at the theatre entrance:</p>
-              <img src="${qrCodeDataUrl}" alt="Ticket QR Code" style="width: 200px; height: 200px; border: 4px solid #e50914; border-radius: 8px;" />
+              <img src="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${_id}" alt="Ticket QR Code" style="width: 200px; height: 200px; border: 4px solid #e50914; border-radius: 8px;" />
             </div>
 
             <p style="color: #aaa; font-size: 12px; text-align: center; margin-top: 30px;">

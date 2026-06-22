@@ -15,12 +15,13 @@ const Movie = require('./models/Movie');
 const Theatre = require('./models/Theatre');
 const Show = require('./models/Show');
 
-const generateSeatMap = (rows = 6, cols = 10) => {
-  const rowLabels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').slice(0, rows);
+const generateSeatMap = (tierConfig) => {
   const seatMap = {};
-  for (const row of rowLabels) {
-    for (let c = 1; c <= cols; c++) {
-      seatMap[`${row}${c}`] = 'available';
+  for (const tier of tierConfig) {
+    for (const row of tier.rows) {
+      for (let c = 1; c <= tier.seatsPerRow; c++) {
+        seatMap[`${row}${c}`] = { status: 'available', category: tier.categoryName };
+      }
     }
   }
   return seatMap;
@@ -108,12 +109,18 @@ const seed = async () => {
   console.log(`🎬 ${movies.length} movies created`);
 
   // ─── Theatres ──────────────────────────────────────────────────────────
+  const standardTierConfig = [
+    { categoryName: 'Recliner', rows: ['A'], seatsPerRow: 10 },
+    { categoryName: 'Premium', rows: ['B', 'C'], seatsPerRow: 10 },
+    { categoryName: 'Standard', rows: ['D', 'E', 'F'], seatsPerRow: 10 }
+  ];
+
   const theatre1 = await Theatre.create({
     name: 'PVR Cinemas Select CityWalk',
     location: { address: 'A-3, District Centre, Saket', city: 'New Delhi', state: 'Delhi' },
     screens: [
-      { screenNumber: 1, totalSeats: 60 },
-      { screenNumber: 2, totalSeats: 60 },
+      { screenNumber: 1, totalSeats: 60, tierConfig: standardTierConfig },
+      { screenNumber: 2, totalSeats: 60, tierConfig: standardTierConfig },
     ],
     isActive: true,
   });
@@ -122,8 +129,8 @@ const seed = async () => {
     name: 'INOX Megaplex Andheri',
     location: { address: 'Infiniti Mall, Link Road, Andheri West', city: 'Mumbai', state: 'Maharashtra' },
     screens: [
-      { screenNumber: 1, totalSeats: 60 },
-      { screenNumber: 2, totalSeats: 60 },
+      { screenNumber: 1, totalSeats: 60, tierConfig: standardTierConfig },
+      { screenNumber: 2, totalSeats: 60, tierConfig: standardTierConfig },
     ],
     isActive: true,
   });
@@ -136,17 +143,17 @@ const seed = async () => {
     showDate.setDate(showDate.getDate() + dayOffset + 1);
 
     showsToCreate.push(
-      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(showDate.setHours(10, 0, 0, 0)), ticketPrice: 250 },
-      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(14, 30, 0, 0)), ticketPrice: 300 },
-      { movie: movies[1]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(11, 0, 0, 0)), ticketPrice: 200 },
-      { movie: movies[2]._id, theatre: theatre2._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(13, 0, 0, 0)), ticketPrice: 350 },
-      { movie: movies[3]._id, theatre: theatre2._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(20, 30, 0, 0)), ticketPrice: 280 },
-      { movie: movies[3]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(18, 0, 0, 0)), ticketPrice: 260 },
+      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(showDate.setHours(10, 0, 0, 0)), categoryPricing: { Recliner: 500, Premium: 300, Standard: 200 } },
+      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(14, 30, 0, 0)), categoryPricing: { Recliner: 550, Premium: 350, Standard: 250 } },
+      { movie: movies[1]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(11, 0, 0, 0)), categoryPricing: { Recliner: 400, Premium: 250, Standard: 150 } },
+      { movie: movies[2]._id, theatre: theatre2._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(13, 0, 0, 0)), categoryPricing: { Recliner: 600, Premium: 400, Standard: 300 } },
+      { movie: movies[3]._id, theatre: theatre2._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(20, 30, 0, 0)), categoryPricing: { Recliner: 450, Premium: 300, Standard: 200 } },
+      { movie: movies[3]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(18, 0, 0, 0)), categoryPricing: { Recliner: 500, Premium: 320, Standard: 220 } },
     );
   }
 
   for (const showData of showsToCreate) {
-    await Show.create({ ...showData, seats: generateSeatMap(6, 10) });
+    await Show.create({ ...showData, seats: generateSeatMap(standardTierConfig) });
   }
   console.log(`📅 ${showsToCreate.length} shows created`);
 

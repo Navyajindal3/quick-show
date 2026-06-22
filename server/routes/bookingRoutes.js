@@ -6,6 +6,7 @@ const {
   getMyBookings,
   getBookingById,
   getAllBookingsAdmin,
+  verifyTicket,
 } = require('../controllers/bookingController');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 
@@ -17,5 +18,6 @@ router.get('/:id', protect, getBookingById);
 
 // Admin routes
 router.get('/admin/all', protect, adminOnly, getAllBookingsAdmin);
+router.put('/verify/:id', protect, adminOnly, verifyTicket);
 
 module.exports = router;

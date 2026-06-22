@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import AdminLayout from './AdminLayout';
 import api from '../../services/api';
 import toast from 'react-hot-toast';
-import { Plus, Edit2, Trash2, X, Building2, MapPin } from 'lucide-react';
+import { Plus, Edit2, Trash2, X, Building2, MapPin, Search } from 'lucide-react';
 
 const EMPTY_FORM = {
   name: '',
@@ -19,17 +19,25 @@ export default function ManageTheatres() {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
 
-  const fetchTheatres = async () => {
+  const fetchTheatres = async (query = '') => {
     setLoading(true);
     try {
-      const { data } = await api.get('/theatres/admin/all');
+      const url = query ? `/theatres/admin/all?search=${encodeURIComponent(query)}` : '/theatres/admin/all';
+      const { data } = await api.get(url);
       setTheatres(data.theatres);
     } catch { toast.error('Failed to load theatres'); }
     setLoading(false);
   };
 
-  useEffect(() => { fetchTheatres(); }, []);
+  useEffect(() => {
+    const delayDebounceFn = setTimeout(() => {
+      fetchTheatres(searchTerm);
+    }, 300);
+
+    return () => clearTimeout(delayDebounceFn);
+  }, [searchTerm]);
 
   const openCreate = () => {
     setForm(EMPTY_FORM);
@@ -108,14 +116,30 @@ export default function ManageTheatres() {
   return (
     <AdminLayout>
       <div style={{ padding: 32 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, flexWrap: 'wrap', gap: 16 }}>
           <div>
             <h1 style={{ fontSize: 24, fontWeight: 800, color: 'white' }}>Theatres</h1>
-            <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>{theatres.length} theatres registered</p>
+            <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>{theatres.length} theatres found</p>
           </div>
-          <button id="add-theatre-btn" onClick={openCreate} className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Plus size={16} /> Add Theatre
-          </button>
+          <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative' }}>
+              <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: 12, top: 12 }} />
+              <input 
+                type="text" 
+                placeholder="Search by name or city..." 
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                style={{
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)',
+                  borderRadius: 8, padding: '10px 16px 10px 36px', color: 'white',
+                  fontSize: 14, minWidth: 250, outline: 'none'
+                }}
+              />
+            </div>
+            <button id="add-theatre-btn" onClick={openCreate} className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Plus size={16} /> Add Theatre
+            </button>
+          </div>
         </div>
 
         {/* Grid */}

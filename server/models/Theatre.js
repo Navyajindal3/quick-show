@@ -14,6 +14,13 @@ const screenSchema = new mongoose.Schema({
     required: true,
     default: 60, // 6 rows x 10 columns default
   },
+  tierConfig: [
+    {
+      categoryName: { type: String, required: true },
+      rows: { type: [String], required: true },
+      seatsPerRow: { type: Number, required: true },
+    },
+  ],
 });
 
 /**

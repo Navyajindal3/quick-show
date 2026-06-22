@@ -1,14 +1,19 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const cookieParser = require('cookie-parser');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
+const { initCronJobs } = require('./utils/cronJobs');
 
 // Load environment variables first
 dotenv.config();
 
 // Connect to MongoDB
 connectDB();
+
+// Initialize automated background jobs
+initCronJobs();
 
 const app = express();
 
@@ -18,11 +23,13 @@ app.use(cors({
   credentials: true,
 }));
 
-// ─── Body Parsers ───────────────────────────────────────────────────────────
+// ─── Webhooks (Must be before body parsers to preserve raw body) ─────────────
+app.use('/api/webhook', express.raw({ type: 'application/json' }), require('./routes/paymentRoutes'));
 
-// ─── Body Parsers (after webhook route) ────────────────────────────────────
+// ─── Body Parsers ───────────────────────────────────────────────────────────
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
 app.use('/api/auth', require('./routes/authRoutes'));

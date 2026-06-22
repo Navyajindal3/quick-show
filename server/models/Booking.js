@@ -43,6 +43,10 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       default: null, // Base64 data URL of the QR code image
     },
+    isScanned: {
+      type: Boolean,
+      default: false, // Tracks if the QR code has been verified by the theatre admin
+    },
     // Snapshot of movie/show info at booking time (for receipt display even if show is deleted)
     bookingSnapshot: {
       movieTitle: String,

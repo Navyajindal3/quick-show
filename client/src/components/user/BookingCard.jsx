@@ -115,7 +115,7 @@ export default function BookingCard({ booking }) {
         </div>
 
         {/* QR Code */}
-        {paymentStatus === 'paid' && qrCodeUrl && (
+        {paymentStatus === 'paid' && _id && (
           <div style={{ textAlign: 'center' }}>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>Show at entrance</p>
             <div style={{
@@ -123,7 +123,7 @@ export default function BookingCard({ booking }) {
               border: '3px solid #e50914',
               boxShadow: '0 0 20px rgba(229,9,20,0.2)',
             }}>
-              <img src={qrCodeUrl} alt="Ticket QR Code" style={{ width: 120, height: 120, display: 'block' }} />
+              <img src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`${window.location.origin}/booking-success?bookingId=${_id}`)}`} alt="Ticket QR Code" style={{ width: 120, height: 120, display: 'block' }} />
             </div>
             <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6 }}>Scan to verify</p>
           </div>

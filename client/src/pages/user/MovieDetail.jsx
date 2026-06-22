@@ -7,7 +7,7 @@ import {
 } from '../../redux/slices/movieSlice';
 import { selectIsAuthenticated } from '../../redux/slices/authSlice';
 import Spinner from '../../components/common/Spinner';
-import { Clock, Globe, Star, Calendar, MapPin, ChevronRight, Film } from 'lucide-react';
+import { Clock, Globe, Star, Calendar, MapPin, ChevronRight, Film, Search } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function MovieDetail() {
@@ -21,6 +21,7 @@ export default function MovieDetail() {
   const isAuthenticated = useSelector(selectIsAuthenticated);
 
   const [selectedDate, setSelectedDate] = useState('');
+  const [theatreSearch, setTheatreSearch] = useState('');
 
   // Generate next 7 days for date selector
   const next7Days = Array.from({ length: 7 }, (_, i) => {
@@ -49,13 +50,23 @@ export default function MovieDetail() {
     dispatch(fetchShowsByMovie({ movieId: id, date: dateStr }));
   };
 
-  // Group shows by theatre
   const showsByTheatre = shows.reduce((acc, show) => {
     const theatreId = show.theatre._id;
     if (!acc[theatreId]) {
       acc[theatreId] = { theatre: show.theatre, shows: [] };
     }
     acc[theatreId].shows.push(show);
+    return acc;
+  }, {});
+
+  const filteredShowsByTheatre = Object.entries(showsByTheatre).reduce((acc, [id, data]) => {
+    const searchLower = theatreSearch.toLowerCase();
+    if (
+      data.theatre.name.toLowerCase().includes(searchLower) ||
+      data.theatre.location?.city?.toLowerCase().includes(searchLower)
+    ) {
+      acc[id] = data;
+    }
     return acc;
   }, {});
 
@@ -136,9 +147,27 @@ export default function MovieDetail() {
 
       {/* Shows Section */}
       <div style={{ maxWidth: 1280, margin: '0 auto', padding: '32px 24px 60px' }}>
-        <h2 style={{ fontSize: 22, fontWeight: 800, color: 'white', marginBottom: 24 }}>
-          Select Date & Theatre
-        </h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 16 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 800, color: 'white' }}>
+            Select Date & Theatre
+          </h2>
+          <div style={{ position: 'relative' }}>
+            <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: 12, top: 12 }} />
+            <input 
+              type="text" 
+              placeholder="Find your cinema..." 
+              value={theatreSearch}
+              onChange={(e) => setTheatreSearch(e.target.value)}
+              style={{
+                background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)',
+                borderRadius: 8, padding: '10px 16px 10px 36px', color: 'white',
+                fontSize: 14, minWidth: 250, outline: 'none', transition: 'all 0.3s ease'
+              }}
+              onFocus={(e) => { e.target.style.borderColor = '#e50914'; e.target.style.boxShadow = '0 0 20px rgba(229,9,20,0.2)'; }}
+              onBlur={(e) => { e.target.style.borderColor = 'var(--border-subtle)'; e.target.style.boxShadow = 'none'; }}
+            />
+          </div>
+        </div>
 
         {/* Date Selector */}
         <div style={{ display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 4, marginBottom: 32, scrollbarWidth: 'none' }}>
@@ -177,9 +206,15 @@ export default function MovieDetail() {
             <p style={{ fontSize: 16, fontWeight: 600 }}>No shows available</p>
             <p style={{ fontSize: 13, marginTop: 6 }}>Try selecting a different date</p>
           </div>
+        ) : Object.keys(filteredShowsByTheatre).length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)', background: 'var(--bg-card)', borderRadius: 16, border: '1px solid var(--border-subtle)' }}>
+            <Search size={40} style={{ margin: '0 auto 12px', opacity: 0.3 }} />
+            <p style={{ fontSize: 16, fontWeight: 600 }}>No cinemas found</p>
+            <p style={{ fontSize: 13, marginTop: 6 }}>This movie is not currently showing at any theaters in this location.</p>
+          </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {Object.values(showsByTheatre).map(({ theatre, shows: theatreShows }) => (
+            {Object.values(filteredShowsByTheatre).map(({ theatre, shows: theatreShows }) => (
               <div key={theatre._id} className="glass-card" style={{ padding: 24 }}>
                 {/* Theatre header */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20, paddingBottom: 16, borderBottom: '1px solid var(--border-subtle)' }}>

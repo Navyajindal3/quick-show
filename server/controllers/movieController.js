@@ -12,7 +12,12 @@ const getMovies = async (req, res, next) => {
 
     if (genre) filter.genre = { $in: [genre] };
     if (language) filter.language = language;
-    if (search) filter.title = { $regex: search, $options: 'i' };
+    if (search) {
+      filter.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { genre: { $regex: search, $options: 'i' } }
+      ];
+    }
 
     const movies = await Movie.find(filter).sort({ releaseDate: -1 });
     res.status(200).json({ success: true, count: movies.length, movies });

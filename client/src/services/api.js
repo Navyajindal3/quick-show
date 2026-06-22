@@ -1,32 +1,24 @@
 import axios from 'axios';
 
+// 1. Define the dynamic URL right here
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+
 /**
  * Axios instance configured with base URL and auth interceptor.
  * All API calls should use this instance.
  */
 const api = axios.create({
-  baseURL: '/api',
+  // 2. Inject it into the baseURL, keeping the /api suffix
+  baseURL: `${API_URL}/api`,
   headers: { 'Content-Type': 'application/json' },
+  withCredentials: true, // Attach cookies automatically
 });
-
-// Request interceptor: attach JWT token from localStorage
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
 
 // Response interceptor: handle 401 (auto-logout on token expiry)
 api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
       localStorage.removeItem('user');
       // Redirect to login if not already there
       if (!window.location.pathname.includes('/login')) {

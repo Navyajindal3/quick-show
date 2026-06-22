@@ -1,8 +1,8 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
-import { useDispatch, useSelector } from 'react-redux';
-import { fetchBookingById, selectCurrentBooking, selectBookingLoading } from '../../redux/slices/bookingSlice';
+import { useDispatch } from 'react-redux';
 import { clearSelectedSeats } from '../../redux/slices/bookingSlice';
+import api from '../../services/api';
 import Spinner from '../../components/common/Spinner';
 import { CheckCircle, Ticket, MapPin, Clock, Download, Home, ArrowRight } from 'lucide-react';
 
@@ -11,31 +11,32 @@ export default function BookingSuccess() {
   const bookingId = searchParams.get('bookingId');
   const dispatch = useDispatch();
   const navigate = useNavigate();
-  const booking = useSelector(selectCurrentBooking);
-  const isLoading = useSelector(selectBookingLoading);
-  const fetched = useRef(false);
+  
+  const [booking, setBooking] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(true);
 
   useEffect(() => {
     dispatch(clearSelectedSeats());
-    if (bookingId && !fetched.current) {
-      fetched.current = true;
-      // Poll for booking to be marked 'paid' by webhook (up to 10 seconds)
-      let attempts = 0;
-      const poll = setInterval(async () => {
-        const result = await dispatch(fetchBookingById(bookingId));
-        attempts++;
-        if (fetchBookingById.fulfilled.match(result)) {
-          const b = result.payload;
-          if (b.paymentStatus === 'paid' || attempts >= 5) {
-            clearInterval(poll);
-          }
+    
+    if (bookingId) {
+      const fetchBooking = async () => {
+        try {
+          const res = await api.get(`/bookings/${bookingId}`);
+          setBooking(res.data.booking);
+        } catch (error) {
+          console.error("Failed to fetch booking:", error);
+        } finally {
+          setIsProcessing(false);
         }
-      }, 2000);
-      return () => clearInterval(poll);
-    }
-  }, [bookingId]);
+      };
 
-  if (isLoading && !booking) return <Spinner text="Confirming your booking..." />;
+      fetchBooking();
+    } else {
+      setIsProcessing(false);
+    }
+  }, [bookingId, dispatch]);
+
+  if (isProcessing) return <Spinner text="Confirming your booking..." />;
 
   const isPaid = booking?.paymentStatus === 'paid';
 
@@ -104,7 +105,7 @@ export default function BookingSuccess() {
                     boxShadow: '0 0 30px rgba(229,9,20,0.3)',
                     display: 'inline-block',
                   }}>
-                    <img src={booking.qrCodeUrl} alt="Ticket QR Code" style={{ width: 150, height: 150, display: 'block' }} />
+                    <img src={booking.qrCodeUrl} alt="Secure Ticket QR Code" style={{ width: 150, height: 150, display: 'block' }} />
                   </div>
                   <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>Show at entrance</p>
                 </div>

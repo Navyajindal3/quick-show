@@ -8,7 +8,6 @@ export const loginUser = createAsyncThunk(
   async (credentials, { rejectWithValue }) => {
     try {
       const { data } = await api.post('/auth/login', credentials);
-      localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       return data;
     } catch (error) {
@@ -22,7 +21,6 @@ export const registerUser = createAsyncThunk(
   async (userData, { rejectWithValue }) => {
     try {
       const { data } = await api.post('/auth/register', userData);
-      localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       return data;
     } catch (error) {
@@ -43,6 +41,19 @@ export const fetchCurrentUser = createAsyncThunk(
   }
 );
 
+export const logoutUser = createAsyncThunk(
+  'auth/logout',
+  async (_, { rejectWithValue }) => {
+    try {
+      await api.post('/auth/logout');
+      localStorage.removeItem('user');
+      return null;
+    } catch (error) {
+      return rejectWithValue(error.response?.data?.message || 'Logout failed');
+    }
+  }
+);
+
 // ─── Slice ────────────────────────────────────────────────────────────────
 
 const storedUser = localStorage.getItem('user');
@@ -51,15 +62,12 @@ const authSlice = createSlice({
   name: 'auth',
   initialState: {
     user: storedUser ? JSON.parse(storedUser) : null,
-    token: localStorage.getItem('token') || null,
     isLoading: false,
     error: null,
   },
   reducers: {
     logout(state) {
       state.user = null;
-      state.token = null;
-      localStorage.removeItem('token');
       localStorage.removeItem('user');
     },
     clearError(state) {
@@ -73,7 +81,6 @@ const authSlice = createSlice({
       .addCase(loginUser.fulfilled, (state, action) => {
         state.isLoading = false;
         state.user = action.payload.user;
-        state.token = action.payload.token;
       })
       .addCase(loginUser.rejected, (state, action) => {
         state.isLoading = false;
@@ -86,7 +93,6 @@ const authSlice = createSlice({
       .addCase(registerUser.fulfilled, (state, action) => {
         state.isLoading = false;
         state.user = action.payload.user;
-        state.token = action.payload.token;
       })
       .addCase(registerUser.rejected, (state, action) => {
         state.isLoading = false;
@@ -98,6 +104,12 @@ const authSlice = createSlice({
       .addCase(fetchCurrentUser.fulfilled, (state, action) => {
         state.user = action.payload.user;
       });
+
+    // Logout User Thunk
+    builder
+      .addCase(logoutUser.fulfilled, (state) => {
+        state.user = null;
+      });
   },
 });
 
@@ -105,7 +117,7 @@ export const { logout, clearError } = authSlice.actions;
 
 // Selectors
 export const selectCurrentUser = (state) => state.auth.user;
-export const selectIsAuthenticated = (state) => !!state.auth.token;
+export const selectIsAuthenticated = (state) => !!state.auth.user;
 export const selectIsAdmin = (state) => state.auth.user?.role === 'admin';
 export const selectAuthLoading = (state) => state.auth.isLoading;
 export const selectAuthError = (state) => state.auth.error;

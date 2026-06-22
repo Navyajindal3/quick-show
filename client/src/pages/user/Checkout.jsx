@@ -88,8 +88,22 @@ export default function Checkout() {
 
   if (!show) return <Spinner text="Loading order summary..." />;
 
-  const { movie, theatre, showTime, screenNumber, ticketPrice } = show;
-  const subtotal = selectedSeats.length * ticketPrice;
+  const { movie, theatre, showTime, screenNumber, categoryPricing, seats } = show;
+  
+  // Calculate dynamic subtotal based on seat categories
+  const seatsObj = seats instanceof Map ? Object.fromEntries(seats) : (seats || {});
+  let subtotal = 0;
+  const categoryCounts = {};
+  
+  selectedSeats.forEach(seatLabel => {
+    const seatInfo = seatsObj[seatLabel];
+    if (seatInfo && seatInfo.category && categoryPricing) {
+      const price = categoryPricing[seatInfo.category] || 0;
+      subtotal += price;
+      categoryCounts[seatInfo.category] = (categoryCounts[seatInfo.category] || 0) + 1;
+    }
+  });
+
   const convenienceFee = Math.round(subtotal * 0.02); // 2% convenience fee
   const totalAmount = subtotal + convenienceFee;
 
@@ -181,10 +195,12 @@ export default function Checkout() {
               <h2 style={{ fontSize: 16, fontWeight: 800, color: 'white', marginBottom: 20 }}>Price Breakdown</h2>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: 'var(--text-secondary)' }}>
-                  <span>₹{ticketPrice} × {selectedSeats.length} seat(s)</span>
-                  <span>₹{subtotal}</span>
-                </div>
+                {Object.entries(categoryCounts).map(([cat, count]) => (
+                  <div key={cat} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: 'var(--text-secondary)' }}>
+                    <span>{cat} (₹{categoryPricing[cat]}) × {count}</span>
+                    <span>₹{categoryPricing[cat] * count}</span>
+                  </div>
+                ))}
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: 'var(--text-secondary)' }}>
                   <span>Convenience Fee</span>
                   <span>₹{convenienceFee}</span>

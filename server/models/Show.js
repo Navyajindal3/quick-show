@@ -31,22 +31,25 @@ const showSchema = new mongoose.Schema(
       type: Date,
       required: [true, 'Show time is required'],
     },
-    ticketPrice: {
-      type: Number,
-      required: [true, 'Ticket price is required'],
-      min: 0,
+    categoryPricing: {
+      type: Map,
+      of: Number,
+      required: [true, 'Category pricing is required'],
+      default: {},
     },
     /**
-     * seats: Map<seatLabel, status>
-     * Initialized when the show is created based on theatre screen total seats.
-     * Rows: A–F (6 rows), Columns: 1–10 → 60 seats total
+     * seats: Map<seatLabel, seatObject>
+     * Initialized when the show is created based on theatre screen total seats and tier config.
      */
     seats: {
       type: Map,
-      of: {
-        type: String,
-        enum: ['available', 'locked', 'booked'],
-      },
+      of: new mongoose.Schema(
+        {
+          status: { type: String, enum: ['available', 'locked', 'booked'], default: 'available' },
+          category: { type: String, required: true },
+        },
+        { _id: false }
+      ),
       default: {},
     },
     /**

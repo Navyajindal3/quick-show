@@ -1,0 +1,109 @@
+=============================================================
+         QUICK-SHOW : MOVIE TICKET BOOKING SYSTEM
+                 COMPLETE ARCHITECTURE & FLOW
+=============================================================
+
+1. OVERVIEW & TECH STACK
+-------------------------------------------------------------
+Quick-Show is a full-stack MERN (MongoDB, Express, React, Node.js) application designed for movie ticket booking.
+
+• Frontend (Client): React (built with Vite), Redux Toolkit (state management), React Router DOM (routing), Tailwind CSS (styling), Lucide React (icons), Axios (API client).
+• Backend (Server): Node.js with Express.js, MongoDB (Mongoose ORM).
+• Authentication: JSON Web Tokens (JWT) & bcryptjs (password hashing).
+• Payment Gateway: Razorpay integration.
+• Features: Node-cron (background jobs), Nodemailer (email notifications), qrcode (ticket generation).
+
+2. DIRECTORY STRUCTURE & ROOT SCRIPTS
+-------------------------------------------------------------
+The project is organized into a mono-repo style structure with a `client` folder and a `server` folder.
+• `package.json` (Root): Contains global scripts like `npm run install:all`, `npm run dev:client`, and `npm run dev:server` to run both sides simultaneously.
+• `seed.js`: A script to inject initial mock data (movies, theatres, shows) into the MongoDB database for testing.
+
+3. BACKEND ARCHITECTURE (SERVER)
+-------------------------------------------------------------
+The backend acts as a RESTful API.
+
+• Entry Point (`server.js`): 
+  - Loads environment variables.
+  - Connects to MongoDB (`config/db.js`).
+  - Initializes background tasks via Cron (`utils/cronJobs`).
+  - Configures CORS, JSON parsers, and mounts all API route prefixes (`/api/auth`, `/api/movies`, `/api/theatres`, `/api/shows`, `/api/bookings`).
+  - Attaches a global error handler for standardized API responses.
+
+• Models (`server/models/`):
+  - User.js: Stores user details, passwords (hashed), and roles (user/admin).
+  - Movie.js: Stores movie metadata (title, poster, description, language, duration).
+  - Theatre.js: Stores cinema details (name, location, total seats).
+  - Show.js: Represents a specific movie showing at a specific theatre and time. Stores the current seating layout state (available, locked, booked).
+  - Booking.js: Links User, Show, and locked/booked Seats. Stores Razorpay payment details and status.
+
+• Controllers (`server/controllers/`):
+  - Handle business logic. For example:
+    * `authController`: Registers users, verifies passwords, and generates JWTs.
+    * `bookingController`: Creates Razorpay orders, verifies payment signatures, finalizes bookings, and triggers email dispatches containing QR codes for the ticket.
+
+• Routes (`server/routes/`):
+  - Map HTTP methods (GET, POST, PUT, DELETE) to specific controllers.
+  - Apply middlewares (e.g., JWT validation to ensure users are logged in, and admin checks for administrative routes).
+
+• Utilities & Middleware (`server/utils/` & `server/middleware/`):
+  - `sendEmail.js`: Uses Nodemailer to send booking confirmation emails.
+  - `cronJobs.js`: Automated jobs that run in the background (e.g., releasing seats if a payment fails/times out, or marking past shows as completed).
+  - `errorHandler.js`: Catches exceptions and formats them into clean JSON error responses.
+
+4. FRONTEND ARCHITECTURE (CLIENT)
+-------------------------------------------------------------
+The frontend is a Single Page Application (SPA).
+
+• Entry Point (`src/main.jsx` & `src/App.jsx`):
+  - App.jsx wraps the application in the Redux `<Provider>` and React Router's `<Router>`.
+  - Defines the routing layout. Routes are split into Public, Protected (requires login), and Admin (requires admin role).
+
+• API Layer (`src/services/api.js`):
+  - Configures a global Axios instance targeting `/api`.
+  - Uses Interceptors: 
+    * Request Interceptor: Automatically fetches the JWT from localStorage and attaches it as an `Authorization: Bearer <token>` header to every request.
+    * Response Interceptor: Listens for 401 Unauthorized errors to automatically log the user out if their session expires.
+
+• State Management (`src/redux/`):
+  - Redux Toolkit is used to manage global state across components.
+  - Slices (`authSlice`, `movieSlice`, `bookingSlice`) hold the state logic (e.g., currently authenticated user, list of fetched movies, and the temporary selected seats during the booking flow).
+
+• Components (`src/components/`):
+  - Reusable UI elements.
+  - `common/Navbar.jsx`: Top navigation, handles login/logout UI.
+  - `common/ProtectedRoute.jsx`: A wrapper component that redirects users to `/login` if they try to access secure routes without a token.
+  - `user/SeatGrid.jsx`: An interactive grid allowing users to click and select/deselect specific seats.
+
+• Pages (`src/pages/`):
+  - Auth Pages (`Login`, `Register`): Handle user authentication and token retrieval.
+  - User Pages:
+    * `Home`: Displays current movies.
+    * `MovieDetail`: Shows info about a movie and lists available shows/theatres.
+    * `SeatSelection`: Interactive UI for users to pick their preferred seats for a specific show.
+    * `Checkout`: Displays a summary and mounts the Razorpay payment modal.
+    * `BookingSuccess`: Confirmation screen after successful payment.
+    * `MyBookings`: Lists a user's past and upcoming tickets.
+  - Admin Pages:
+    * `AdminDashboard`, `ManageMovies`, `ManageShows`, `ManageTheatres`: Dashboards to perform CRUD operations on the underlying data.
+    * `VerifyTicket`: Admin endpoint to scan user QR codes and validate them.
+
+5. STEP-BY-STEP USER FLOW (BOOKING A TICKET)
+-------------------------------------------------------------
+1. Navigation: User lands on Home, clicks a Movie.
+2. Show Selection: User sees available Theatres and Showtimes for that Movie, selects one.
+3. Auth Check: If the user is not logged in, `ProtectedRoute` forces them to login/register.
+4. Seat Selection: User is redirected to `SeatSelection`. They click empty seats. The frontend updates Redux state.
+5. Checkout & Order Creation: 
+   - User proceeds to Checkout.
+   - Frontend calls backend to create a Razorpay "Order" (seats are temporarily locked).
+   - Razorpay order ID is returned to the frontend.
+6. Payment: 
+   - Frontend triggers the Razorpay popup using the order ID.
+   - User completes payment via Razorpay.
+7. Verification & Confirmation:
+   - Razorpay returns payment details (signature, payment ID) to frontend.
+   - Frontend sends these to backend `verifyPayment` endpoint.
+   - Backend verifies the signature, updates the booking status to 'SUCCESS', and marks seats as permanently booked.
+   - Backend generates a QR code and emails the ticket to the user.
+8. Success: Frontend redirects user to `BookingSuccess` page.

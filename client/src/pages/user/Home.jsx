@@ -16,8 +16,11 @@ export default function Home() {
   const [selectedGenre, setSelectedGenre] = useState('');
 
   useEffect(() => {
-    dispatch(fetchMovies({ search, genre: selectedGenre }));
-  }, [search, selectedGenre]);
+    const delayDebounceFn = setTimeout(() => {
+      dispatch(fetchMovies({ search, genre: selectedGenre }));
+    }, 300);
+    return () => clearTimeout(delayDebounceFn);
+  }, [search, selectedGenre, dispatch]);
 
   const handleSearchChange = (e) => setSearch(e.target.value);
 
@@ -59,14 +62,17 @@ export default function Home() {
               type="text"
               value={search}
               onChange={handleSearchChange}
-              placeholder="Search movies..."
+              placeholder="Search movies by title or genre..."
               className="input-field"
               style={{
-                paddingLeft: 50, height: 52, fontSize: 15,
+                paddingLeft: 50, height: 52, fontSize: 15, width: '100%',
                 background: 'rgba(30,30,42,0.8)', backdropFilter: 'blur(12px)',
                 border: '1.5px solid rgba(229,9,20,0.3)',
                 boxShadow: '0 0 30px rgba(229,9,20,0.1)',
+                color: 'white', transition: 'all 0.3s ease', outline: 'none'
               }}
+              onFocus={(e) => { e.target.style.borderColor = '#e50914'; e.target.style.boxShadow = '0 0 40px rgba(229,9,20,0.4)'; }}
+              onBlur={(e) => { e.target.style.borderColor = 'rgba(229,9,20,0.3)'; e.target.style.boxShadow = '0 0 30px rgba(229,9,20,0.1)'; }}
             />
           </div>
         </div>

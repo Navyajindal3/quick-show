@@ -6,10 +6,11 @@ const User = require('../models/User');
  * Attaches `req.user` (without password) if valid.
  */
 const protect = async (req, res, next) => {
-  let token;
+  let token = req.cookies.token;
 
-  // Check Authorization header
+  // Check Authorization header as fallback
   if (
+    !token &&
     req.headers.authorization &&
     req.headers.authorization.startsWith('Bearer ')
   ) {

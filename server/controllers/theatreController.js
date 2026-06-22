@@ -7,7 +7,17 @@ const Theatre = require('../models/Theatre');
  */
 const getTheatres = async (req, res, next) => {
   try {
-    const theatres = await Theatre.find({ isActive: true });
+    const { search } = req.query;
+    const query = { isActive: true };
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { 'location.city': { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const theatres = await Theatre.find(query);
     res.status(200).json({ success: true, count: theatres.length, theatres });
   } catch (error) {
     next(error);
@@ -21,7 +31,17 @@ const getTheatres = async (req, res, next) => {
  */
 const getAllTheatresAdmin = async (req, res, next) => {
   try {
-    const theatres = await Theatre.find().sort({ createdAt: -1 });
+    const { search } = req.query;
+    const query = {};
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { 'location.city': { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    const theatres = await Theatre.find(query).sort({ createdAt: -1 });
     res.status(200).json({ success: true, count: theatres.length, theatres });
   } catch (error) {
     next(error);

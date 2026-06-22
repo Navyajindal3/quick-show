@@ -20,7 +20,7 @@ export default function SeatSelection() {
   useEffect(() => {
     dispatch(fetchShowById(showId));
     dispatch(clearSelectedSeats());
-  }, [showId]);
+  }, [showId, dispatch]);
 
   const handleProceed = async () => {
     if (selectedSeats.length === 0) {
@@ -40,11 +40,25 @@ export default function SeatSelection() {
   if (isLoading && !show) return <Spinner text="Loading seats..." />;
   if (!show) return null;
 
-  const { movie, theatre, showTime, screenNumber, ticketPrice, seats } = show;
-  const totalAmount = selectedSeats.length * ticketPrice;
+  const { movie, theatre, showTime, screenNumber, categoryPricing, seats } = show;
 
-  // Convert seats Map to plain object for SeatGrid
+  // Convert seats Map to plain object for SeatGrid and calculations
   const seatsObj = seats instanceof Map ? Object.fromEntries(seats) : (seats || {});
+
+  // Calculate dynamic total
+  let totalAmount = 0;
+  selectedSeats.forEach(seatLabel => {
+    const seatInfo = seatsObj[seatLabel];
+    if (seatInfo && seatInfo.category && categoryPricing) {
+      totalAmount += (categoryPricing[seatInfo.category] || 0);
+    }
+  });
+
+  // Get price range for header
+  const prices = categoryPricing ? Object.values(categoryPricing) : [0];
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceDisplay = minPrice === maxPrice ? `₹${minPrice}` : `₹${minPrice} - ₹${maxPrice}`;
 
   return (
     <div style={{ minHeight: '100vh', padding: '24px 16px 60px' }}>
@@ -88,7 +102,7 @@ export default function SeatSelection() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <IndianRupee size={16} color="#4ade80" />
-            <span style={{ fontSize: 15, fontWeight: 700, color: '#4ade80' }}>{ticketPrice}/seat</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: '#4ade80' }}>{priceDisplay}</span>
           </div>
         </div>
 
@@ -97,7 +111,7 @@ export default function SeatSelection() {
           <h2 style={{ fontSize: 18, fontWeight: 700, color: 'white', textAlign: 'center', marginBottom: 28 }}>
             Select Your Seats
           </h2>
-          <SeatGrid seats={seatsObj} />
+          <SeatGrid seats={seatsObj} categoryPricing={categoryPricing || {}} />
         </div>
 
         {/* Booking Summary & CTA */}

@@ -26,6 +26,7 @@ import ManageMovies from './pages/admin/ManageMovies';
 import ManageTheatres from './pages/admin/ManageTheatres';
 import ManageShows from './pages/admin/ManageShows';
 import AdminBookings from './pages/admin/AdminBookings';
+import VerifyTicket from './pages/admin/VerifyTicket';
 
 /**
  * Layout wrapper for user-facing pages (with Navbar)
@@ -110,6 +111,11 @@ export default function App() {
           <Route path="/admin/bookings" element={
             <ProtectedRoute adminOnly>
               <AdminBookings />
+            </ProtectedRoute>
+          } />
+          <Route path="/admin/verify/:id" element={
+            <ProtectedRoute adminOnly>
+              <VerifyTicket />
             </ProtectedRoute>
           } />
 
