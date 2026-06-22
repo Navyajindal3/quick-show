@@ -77,6 +77,11 @@ const createOrder = async (req, res, next) => {
       },
     });
 
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      console.error('❌ Razorpay keys missing in environment variables');
+      return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
+    }
+
     const razorpay = new Razorpay({
       key_id: process.env.RAZORPAY_KEY_ID,
       key_secret: process.env.RAZORPAY_KEY_SECRET,
