@@ -83,8 +83,8 @@ const createOrder = async (req, res, next) => {
     }
 
     const razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID,
-      key_secret: process.env.RAZORPAY_KEY_SECRET,
+      key_id: process.env.RAZORPAY_KEY_ID.trim(),
+      key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
     });
 
     const options = {
@@ -128,7 +128,7 @@ const verifyPayment = async (req, res, next) => {
     console.log('--- Razorpay Payment Verification ---');
     console.log('Payload Received:', { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId });
     
-    const secret = process.env.RAZORPAY_KEY_SECRET || '';
+    const secret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
     console.log('Secret Key Prefix:', secret.substring(0, 4) + '...');
 
     // Strict string casting as per Razorpay docs
@@ -354,7 +354,7 @@ const verifyTicket = async (req, res, next) => {
 const razorpayWebhook = async (req, res, next) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const secret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
 
     if (!secret || !signature) {
       return res.status(400).send('Missing signature or secret');
