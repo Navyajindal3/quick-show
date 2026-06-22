@@ -18,8 +18,12 @@ initCronJobs();
 const app = express();
 
 // ─── CORS ──────────────────────────────────────────────────────────────────
+// Clean the CLIENT_URL to remove any accidental trailing slashes
+const rawClientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+const allowedOrigin = rawClientUrl.replace(/\/+$/, '');
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: allowedOrigin,
   credentials: true
 }));
 

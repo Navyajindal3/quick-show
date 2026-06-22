@@ -1,15 +1,17 @@
 import axios from 'axios';
 
-// 1. Define the dynamic URL right here
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+// 1. Define the dynamic URL right here. 
+// Remove any accidental trailing slash from the environment variable.
+const rawApiUrl = import.meta.env.VITE_API_URL || "http://localhost:5000";
+const cleanApiUrl = rawApiUrl.replace(/\/+$/, '');
 
 /**
  * Axios instance configured with base URL and auth interceptor.
  * All API calls should use this instance.
  */
 const api = axios.create({
-  // 2. Inject it into the baseURL, keeping the /api suffix
-  baseURL: API_URL,
+  // 2. Inject it into the baseURL, explicitly appending the /api suffix
+  baseURL: `${cleanApiUrl}/api`,
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true, // Attach cookies automatically
 });
