@@ -8,8 +8,8 @@ const createTransporter = () => {
   return nodemailer.createTransport({
     service: 'gmail',
     auth: {
-      user: process.env.NODEMAILER_USER,
-      pass: process.env.NODEMAILER_PASS,
+      user: (process.env.NODEMAILER_USER || '').trim(),
+      pass: (process.env.NODEMAILER_PASS || '').trim(),
     },
   });
 };
