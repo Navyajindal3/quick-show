@@ -105,6 +105,12 @@ const createOrder = async (req, res, next) => {
       bookingId: booking._id,
     });
   } catch (error) {
+    // If Razorpay throws a 401 (Invalid API keys), don't bubble it up as 401.
+    // A 401 response tells the frontend that the USER's session is expired, which logs them out.
+    if (error.statusCode === 401) {
+      error.statusCode = 500;
+      error.message = 'Payment Gateway Configuration Error: Invalid API Keys';
+    }
     next(error);
   }
 };
