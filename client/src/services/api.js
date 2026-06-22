@@ -9,7 +9,7 @@ const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
  */
 const api = axios.create({
   // 2. Inject it into the baseURL, keeping the /api suffix
-  baseURL: `${API_URL}/api`,
+  baseURL: API_URL,
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true, // Attach cookies automatically
 });

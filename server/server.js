@@ -20,7 +20,7 @@ const app = express();
 // ─── CORS ──────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:5173',
-  credentials: true,
+  credentials: true
 }));
 
 // ─── Webhooks (Must be before body parsers to preserve raw body) ─────────────
