@@ -6,11 +6,14 @@ const nodemailer = require('nodemailer');
  */
 const createTransporter = () => {
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
     auth: {
       user: (process.env.NODEMAILER_USER || '').trim(),
       pass: (process.env.NODEMAILER_PASS || '').trim(),
     },
+    family: 4
   });
 };
 
