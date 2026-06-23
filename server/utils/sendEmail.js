@@ -2,7 +2,7 @@ const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId }) => {
+const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, qrCodeUrl }) => {
   try {
     await resend.emails.send({
       from: 'onboarding@resend.dev',
@@ -37,7 +37,7 @@ const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, sh
     <div style="text-align: center; margin-top: 30px;">
       <p style="color: #9CA3AF; margin-bottom: 15px;">Show this QR code at the theatre entrance:</p>
       <div style="background-color: white; padding: 15px; display: inline-block; border-radius: 8px;">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${bookingId}" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
+        <img src="${qrCodeUrl}" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
       </div>
       <p style="color: #9CA3AF; font-size: 12px; margin-top: 25px;">Please arrive 15 minutes before the show. Enjoy your movie! 🍿</p>
     </div>

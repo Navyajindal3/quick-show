@@ -210,7 +210,8 @@ const verifyPayment = async (req, res, next) => {
           screenName: booking.bookingSnapshot?.screenNumber,
           seatsList: booking.seatsSelected?.join(', '),
           amountPaid: booking.totalAmount,
-          bookingId: booking._id
+          bookingId: booking._id,
+          qrCodeUrl: booking.qrCodeUrl
         };
         sendTicketEmail(booking.user.email, emailParams);
       }
@@ -444,7 +445,8 @@ const razorpayWebhook = async (req, res, next) => {
             screenName: booking.bookingSnapshot?.screenNumber,
             seatsList: booking.seatsSelected?.join(', '),
             amountPaid: booking.totalAmount,
-            bookingId: booking._id
+            bookingId: booking._id,
+            qrCodeUrl: booking.qrCodeUrl
           };
           sendTicketEmail(booking.user.email, emailParams);
         }
