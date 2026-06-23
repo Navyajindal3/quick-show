@@ -5,7 +5,7 @@ const Booking = require('../models/Booking');
 const Show = require('../models/Show');
 const User = require('../models/User');
 const generateQRCode = require('../utils/generateQR');
-
+const { sendTicketEmail } = require('../utils/sendEmail');
 const redis = require('../config/redis');
 
 /**
@@ -199,7 +199,11 @@ const verifyPayment = async (req, res, next) => {
       booking.qrCodeUrl = qrCodeDataUrl;
       await booking.save();
 
-
+      console.log('Sending confirmation email...');
+      // 5. Send confirmation email (non-blocking)
+      if (booking.user && booking.user.email) {
+        sendTicketEmail(booking.user.email, booking);
+      }
 
       console.log('✅ Payment Verification Complete! Sending 200 OK.');
       res.status(200).json({ success: true, message: 'Payment verified successfully' });
@@ -420,7 +424,10 @@ const razorpayWebhook = async (req, res, next) => {
           await redis.del(...redisKeysToDelete);
         }
 
-
+        // Send email
+        if (booking.user && booking.user.email) {
+          sendTicketEmail(booking.user.email, booking);
+        }
       } catch (txnError) {
         await session.abortTransaction();
         throw txnError;
