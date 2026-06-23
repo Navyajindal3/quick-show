@@ -1,9 +1,21 @@
 const { Resend } = require('resend');
+const jwt = require('jsonwebtoken');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, qrCodeUrl }) => {
+const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, qrCodeUrl, userId }) => {
   try {
+    // Generate the secure token for the QR code
+    const ticketToken = jwt.sign(
+      { bookingId, userId },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    
+    // Construct the external QR URL for email clients (which block base64)
+    const secureScanUrl = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;
+    const emailQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(secureScanUrl)}`;
+
     await resend.emails.send({
       from: 'onboarding@resend.dev',
       to: userEmail,
@@ -37,7 +49,7 @@ const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, sh
     <div style="text-align: center; margin-top: 30px;">
       <p style="color: #9CA3AF; margin-bottom: 15px;">Show this QR code at the theatre entrance:</p>
       <div style="background-color: white; padding: 15px; display: inline-block; border-radius: 8px;">
-        <img src="${qrCodeUrl}" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
+        <img src="${emailQrUrl}" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
       </div>
       <p style="color: #9CA3AF; font-size: 12px; margin-top: 25px;">Please arrive 15 minutes before the show. Enjoy your movie! 🍿</p>
     </div>
