@@ -202,7 +202,17 @@ const verifyPayment = async (req, res, next) => {
       console.log('Sending confirmation email...');
       // 5. Send confirmation email (non-blocking)
       if (booking.user && booking.user.email) {
-        sendTicketEmail(booking.user.email, booking);
+        const emailParams = {
+          userName: booking.user.name,
+          movieName: booking.bookingSnapshot?.movieTitle,
+          theatreName: booking.bookingSnapshot?.theatreName,
+          showTime: booking.bookingSnapshot?.showTime ? new Date(booking.bookingSnapshot.showTime).toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'N/A',
+          screenName: booking.bookingSnapshot?.screenNumber,
+          seatsList: booking.seatsSelected?.join(', '),
+          amountPaid: booking.totalAmount,
+          bookingId: booking._id
+        };
+        sendTicketEmail(booking.user.email, emailParams);
       }
 
       console.log('✅ Payment Verification Complete! Sending 200 OK.');
@@ -426,7 +436,17 @@ const razorpayWebhook = async (req, res, next) => {
 
         // Send email
         if (booking.user && booking.user.email) {
-          sendTicketEmail(booking.user.email, booking);
+          const emailParams = {
+            userName: booking.user.name,
+            movieName: booking.bookingSnapshot?.movieTitle,
+            theatreName: booking.bookingSnapshot?.theatreName,
+            showTime: booking.bookingSnapshot?.showTime ? new Date(booking.bookingSnapshot.showTime).toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'N/A',
+            screenName: booking.bookingSnapshot?.screenNumber,
+            seatsList: booking.seatsSelected?.join(', '),
+            amountPaid: booking.totalAmount,
+            bookingId: booking._id
+          };
+          sendTicketEmail(booking.user.email, emailParams);
         }
       } catch (txnError) {
         await session.abortTransaction();
