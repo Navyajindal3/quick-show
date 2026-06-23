@@ -5,6 +5,7 @@ import { clearSelectedSeats } from '../../redux/slices/bookingSlice';
 import api from '../../services/api';
 import Spinner from '../../components/common/Spinner';
 import { CheckCircle, Ticket, MapPin, Clock, Download, Home, ArrowRight } from 'lucide-react';
+import html2canvas from 'html2canvas';
 
 export default function BookingSuccess() {
   const [searchParams] = useSearchParams();
@@ -35,6 +36,27 @@ export default function BookingSuccess() {
       setIsProcessing(false);
     }
   }, [bookingId, dispatch]);
+
+  const handleDownloadTicket = async () => {
+    const ticketElement = document.getElementById('ticket-glass-card');
+    if (!ticketElement || !booking) return;
+
+    try {
+      const canvas = await html2canvas(ticketElement, {
+        backgroundColor: '#121212',
+        scale: 2,
+        useCORS: true,
+      });
+
+      const dataUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.download = `QuickShow-Ticket-${booking._id}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (error) {
+      console.error('Failed to download ticket:', error);
+    }
+  };
 
   if (isProcessing) return <Spinner text="Confirming your booking..." />;
 
@@ -67,7 +89,7 @@ export default function BookingSuccess() {
 
         {/* Booking details */}
         {booking && (
-          <div className="glass-card" style={{ padding: 28, marginBottom: 24, textAlign: 'left' }}>
+          <div id="ticket-glass-card" className="glass-card" style={{ padding: 28, marginBottom: 24, textAlign: 'left' }}>
             <div style={{ display: 'flex', gap: 20, marginBottom: 20, flexWrap: 'wrap' }}>
               <div style={{ flex: 1, minWidth: 200 }}>
                 <h2 style={{ fontSize: 20, fontWeight: 800, color: 'white', marginBottom: 12 }}>
@@ -120,9 +142,14 @@ export default function BookingSuccess() {
 
         {/* Actions */}
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+          {isPaid && (
+            <button onClick={handleDownloadTicket} className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Download size={16} /> Download Ticket
+            </button>
+          )}
           <Link to="/my-bookings" style={{ textDecoration: 'none' }}>
-            <button className="btn-primary" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Ticket size={16} /> View My Bookings <ArrowRight size={16} />
+            <button className={isPaid ? "btn-secondary" : "btn-primary"} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Ticket size={16} /> View My Bookings {isPaid ? '' : <ArrowRight size={16} />}
             </button>
           </Link>
           <Link to="/" style={{ textDecoration: 'none' }}>

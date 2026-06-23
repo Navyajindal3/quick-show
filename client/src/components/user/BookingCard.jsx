@@ -1,13 +1,34 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { Calendar, Clock, MapPin, Ticket, CheckCircle, AlertCircle, XCircle } from 'lucide-react';
-
+import { Calendar, Clock, MapPin, Ticket, CheckCircle, AlertCircle, XCircle, Download } from 'lucide-react';
+import html2canvas from 'html2canvas';
 /**
  * BookingCard: Displays a single booking in the My Bookings list.
  * Shows movie poster, title, show details, seat info, and QR code.
  */
 export default function BookingCard({ booking }) {
   const { _id, bookingSnapshot, seatsSelected, totalAmount, paymentStatus, qrCodeUrl, createdAt } = booking;
+  const cardRef = useRef(null);
+
+  const handleDownload = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!cardRef.current) return;
+    try {
+      const canvas = await html2canvas(cardRef.current, {
+        backgroundColor: '#121212',
+        scale: 2,
+        useCORS: true,
+      });
+      const dataUrl = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.download = `QuickShow-Ticket-${_id}.png`;
+      link.href = dataUrl;
+      link.click();
+    } catch (error) {
+      console.error('Download error:', error);
+    }
+  };
 
   const statusConfig = {
     paid: { color: '#22c55e', bg: 'rgba(34,197,94,0.1)', border: 'rgba(34,197,94,0.3)', icon: CheckCircle, label: 'Confirmed' },
@@ -22,7 +43,7 @@ export default function BookingCard({ booking }) {
   const isUpcoming = showDate && showDate > new Date();
 
   return (
-    <div style={{
+    <div ref={cardRef} style={{
       background: 'var(--bg-card)',
       border: `1px solid ${paymentStatus === 'paid' ? 'rgba(229,9,20,0.2)' : 'var(--border-subtle)'}`,
       borderRadius: 16,
@@ -54,6 +75,20 @@ export default function BookingCard({ booking }) {
         }}>
           <StatusIcon size={12} color={status.color} />
           <span style={{ fontSize: 12, fontWeight: 600, color: status.color }}>{status.label}</span>
+          {paymentStatus === 'paid' && (
+            <button 
+              onClick={handleDownload}
+              data-html2canvas-ignore="true"
+              style={{
+                background: 'none', border: 'none', color: status.color, cursor: 'pointer', padding: 0, marginLeft: 8, display: 'flex', transition: 'opacity 0.2s'
+              }}
+              onMouseEnter={e => e.currentTarget.style.opacity = '0.7'}
+              onMouseLeave={e => e.currentTarget.style.opacity = '1'}
+              title="Download Ticket"
+            >
+              <Download size={14} />
+            </button>
+          )}
         </div>
       </div>
 
