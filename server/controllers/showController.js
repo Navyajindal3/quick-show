@@ -1,6 +1,8 @@
 const Show = require('../models/Show');
 const Theatre = require('../models/Theatre');
 const redis = require('../config/redis');
+const crypto = require('crypto');
+const { releaseOwnedLocks } = require('../utils/redisHelpers');
 
 /**
  * Helper: Generate seat map for a show.
@@ -82,7 +84,7 @@ const getShowById = async (req, res, next) => {
     // Query Redis for temporarily locked seats
     const lockPattern = `lock:show_${show._id}:seat_*`;
     const keys = await redis.keys(lockPattern);
-    
+
     if (keys.length > 0) {
       keys.forEach((key) => {
         const seatLabel = key.split('seat_')[1];
@@ -103,19 +105,62 @@ const getShowById = async (req, res, next) => {
  * @desc    Lock seats temporarily for a user (prevents double booking)
  * @route   PATCH /api/shows/:id/lock-seats
  * @access  Private
- *
- * (Legacy frontend endpoint. Real Redis locking now happens in createOrder).
  */
 const lockSeats = async (req, res, next) => {
   try {
     const { seatLabels } = req.body;
+    const showId = req.params.id;
 
-    if (!seatLabels || seatLabels.length === 0) {
+    if (!Array.isArray(seatLabels) || seatLabels.length === 0) {
       return res.status(400).json({ success: false, message: 'No seats provided' });
     }
 
-    // Return 200 OK to allow frontend flow to continue to checkout
-    res.status(200).json({ success: true, message: 'Seats selection acknowledged' });
+    const uniqueSeatLabels = [...new Set(seatLabels)];
+    if (uniqueSeatLabels.length !== seatLabels.length) {
+      return res.status(400).json({ success: false, message: 'Duplicate seat labels are not allowed' });
+    }
+
+    const show = await Show.findById(showId);
+    if (!show) {
+      return res.status(404).json({ success: false, message: 'Show not found' });
+    }
+
+    if (!show.isActive || show.showTime <= new Date()) {
+      return res.status(400).json({ success: false, message: 'Show is not active or has already started' });
+    }
+
+    const lockedKeys = [];
+    let conflict = false;
+    const lockToken = crypto.randomUUID();
+
+    for (const label of uniqueSeatLabels) {
+      const lockKey = `lock:show_${showId}:seat_${label}`;
+      const seat = show.seats.get(label);
+      
+      if (!seat || seat.status === 'booked') {
+        conflict = true;
+        break;
+      }
+
+      const acquired = await redis.set(lockKey, lockToken, 'EX', 600, 'NX');
+      if (!acquired) {
+        conflict = true;
+        break;
+      }
+      lockedKeys.push(lockKey);
+    }
+
+    if (conflict) {
+      if (lockedKeys.length > 0) {
+        await redis.del(...lockedKeys);
+      }
+      return res.status(409).json({
+        success: false,
+        message: 'One or more seats are already reserved or locked.',
+      });
+    }
+
+    res.status(200).json({ success: true, message: 'Seats successfully locked', lockToken, expiresIn: 600 });
   } catch (error) {
     next(error);
   }
@@ -128,19 +173,14 @@ const lockSeats = async (req, res, next) => {
  */
 const releaseSeats = async (req, res, next) => {
   try {
-    const { seatLabels } = req.body;
+    const { seatLabels, lockToken } = req.body;
     const showId = req.params.id;
 
-    if (!seatLabels || seatLabels.length === 0) {
-      return res.status(200).json({ success: true, message: 'No seats to release' });
+    if (!Array.isArray(seatLabels) || seatLabels.length === 0 || !lockToken) {
+      return res.status(200).json({ success: true, message: 'No seats or lock token to release' });
     }
 
-    // Remove any Redis locks
-    const pipeline = redis.pipeline();
-    seatLabels.forEach((label) => {
-      pipeline.del(`lock:show_${showId}:seat_${label}`);
-    });
-    await pipeline.exec();
+    await releaseOwnedLocks(showId, seatLabels, lockToken);
 
     res.status(200).json({ success: true, message: 'Seats released' });
   } catch (error) {

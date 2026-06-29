@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 /**
  * Booking Schema
- * Created when a user selects seats. Initially 'pending' until Stripe confirms payment.
+ * Created when a user selects seats. Initially pending until payment is confirmed.
  * On payment success: status → 'paid', seats permanently booked, QR code generated.
  */
 const bookingSchema = new mongoose.Schema(
@@ -21,6 +21,16 @@ const bookingSchema = new mongoose.Schema(
       type: [String], // e.g., ['A1', 'A2', 'B3']
       required: [true, 'At least one seat must be selected'],
     },
+    subtotal: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    convenienceFee: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
     totalAmount: {
       type: Number,
       required: [true, 'Total amount is required'],
@@ -31,13 +41,29 @@ const bookingSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'failed'],
       default: 'pending',
     },
-    stripeSessionId: {
+    fulfillmentStatus: {
       type: String,
-      default: null,
+      enum: ['pending', 'fulfilled', 'refund_required'],
+      default: 'pending',
     },
-    stripePaymentId: {
+    lockToken: {
       type: String,
-      default: null, // Filled after successful Stripe webhook
+      unique: true,
+      sparse: true,
+    },
+    lockExpiresAt: {
+      type: Date,
+    },
+    razorpayOrderId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
+    razorpayPaymentId: {
+      type: String,
+      unique: true,
+      sparse: true,
     },
     qrCodeUrl: {
       type: String,
@@ -46,6 +72,11 @@ const bookingSchema = new mongoose.Schema(
     isScanned: {
       type: Boolean,
       default: false, // Tracks if the QR code has been verified by the theatre admin
+    },
+    scannedAt: Date,
+    scannedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
     },
     // Snapshot of movie/show info at booking time (for receipt display even if show is deleted)
     bookingSnapshot: {

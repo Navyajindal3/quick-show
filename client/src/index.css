@@ -1,14 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Poppins:wght@400;500;600;700;800&display=swap');
 
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
-body {
-  font-family: 'Inter', sans-serif;
-  background-color: #0A0D14;
-  /* Exact Deep Space Navy */
-  color: #E2E8F0;
-}
 
 /* ─── CSS Custom Properties (Design Tokens) ──────────────────────────────── */
 :root {

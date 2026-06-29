@@ -16,7 +16,10 @@ export default function Login() {
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [showPassword, setShowPassword] = useState(false);
 
-  const from = location.state?.from?.pathname || '/';
+  const previousLocation = location.state?.from;
+  const from = previousLocation 
+    ? `${previousLocation.pathname}${previousLocation.search || ''}` 
+    : '/';
 
   useEffect(() => {
     if (isAuthenticated) navigate(from, { replace: true });

@@ -7,6 +7,7 @@ const {
   getBookingById,
   getAllBookingsAdmin,
   verifyTicket,
+  getTicketDetails,
 } = require('../controllers/bookingController');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 
@@ -14,10 +15,13 @@ const { protect, adminOnly } = require('../middleware/authMiddleware');
 router.post('/create-order', protect, createOrder);
 router.post('/verify-payment', protect, verifyPayment);
 router.get('/my-bookings', protect, getMyBookings);
+router.get('/ticket-details', protect, adminOnly, getTicketDetails);
+router.put('/verify-ticket', protect, adminOnly, verifyTicket);
+
+// Parameterized routes (must come after specific routes like /ticket-details)
 router.get('/:id', protect, getBookingById);
 
 // Admin routes
 router.get('/admin/all', protect, adminOnly, getAllBookingsAdmin);
-router.put('/verify/:id', protect, adminOnly, verifyTicket);
 
 module.exports = router;

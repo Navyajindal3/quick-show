@@ -5,9 +5,9 @@ import api from '../../services/api';
 
 export const createRazorpayOrder = createAsyncThunk(
   'booking/createRazorpayOrder',
-  async ({ showId, seatLabels }, { rejectWithValue }) => {
+  async ({ showId, seatLabels, lockToken }, { rejectWithValue }) => {
     try {
-      const { data } = await api.post('/bookings/create-order', { showId, seatLabels });
+      const { data } = await api.post('/bookings/create-order', { showId, seatLabels, lockToken });
       return data;
     } catch (error) {
       return rejectWithValue(error.response?.data?.message || 'Failed to create order');
@@ -65,9 +65,9 @@ export const lockSeats = createAsyncThunk(
 
 export const releaseSeats = createAsyncThunk(
   'booking/releaseSeats',
-  async ({ showId, seatLabels }, { rejectWithValue }) => {
+  async ({ showId, seatLabels, lockToken }, { rejectWithValue }) => {
     try {
-      const { data } = await api.patch(`/shows/${showId}/release-seats`, { seatLabels });
+      const { data } = await api.patch(`/shows/${showId}/release-seats`, { seatLabels, lockToken });
       return data;
     } catch (error) {
       return rejectWithValue(error.response?.data?.message || 'Failed to release seats');
@@ -77,15 +77,38 @@ export const releaseSeats = createAsyncThunk(
 
 // ─── Slice ────────────────────────────────────────────────────────────────
 
-const bookingSlice = createSlice({
-  name: 'booking',
-  initialState: {
-    selectedSeats: [],     // Currently selected seats by the user
-    currentBooking: null,  // Active pending booking
-    myBookings: [],        // User's booking history
+const getInitialState = () => {
+  const defaultState = {
+    selectedSeats: [],
+    currentBooking: null,
+    myBookings: [],
+    lockToken: null,
     isLoading: false,
     error: null,
-  },
+  };
+  try {
+    const stored = sessionStorage.getItem('seatLock');
+    if (stored) {
+      const data = JSON.parse(stored);
+      if (data.expiresAt && new Date(data.expiresAt) > new Date()) {
+        return {
+          ...defaultState,
+          selectedSeats: data.seatLabels || [],
+          lockToken: data.lockToken,
+        };
+      } else {
+        sessionStorage.removeItem('seatLock');
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return defaultState;
+};
+
+const bookingSlice = createSlice({
+  name: 'booking',
+  initialState: getInitialState(),
   reducers: {
     toggleSeat(state, action) {
       const seatLabel = action.payload;
@@ -98,6 +121,8 @@ const bookingSlice = createSlice({
     },
     clearSelectedSeats(state) {
       state.selectedSeats = [];
+      state.lockToken = null;
+      sessionStorage.removeItem('seatLock');
     },
     clearBookingError(state) {
       state.error = null;
@@ -121,6 +146,7 @@ const bookingSlice = createSlice({
       .addCase(verifyRazorpayPayment.pending, (state) => { state.isLoading = true; state.error = null; })
       .addCase(verifyRazorpayPayment.fulfilled, (state) => {
         state.isLoading = false;
+        sessionStorage.removeItem('seatLock');
       })
       .addCase(verifyRazorpayPayment.rejected, (state, action) => {
         state.isLoading = false;
@@ -154,11 +180,24 @@ const bookingSlice = createSlice({
     // Lock seats
     builder
       .addCase(lockSeats.pending, (state) => { state.isLoading = true; state.error = null; })
-      .addCase(lockSeats.fulfilled, (state) => { state.isLoading = false; })
+      .addCase(lockSeats.fulfilled, (state, action) => { 
+        state.isLoading = false; 
+        state.lockToken = action.payload.lockToken;
+        sessionStorage.setItem('seatLock', JSON.stringify({
+          seatLabels: state.selectedSeats,
+          lockToken: action.payload.lockToken,
+          expiresAt: new Date(Date.now() + action.payload.expiresIn * 1000).toISOString()
+        }));
+      })
       .addCase(lockSeats.rejected, (state, action) => {
         state.isLoading = false;
         state.error = action.payload;
         state.selectedSeats = []; // Clear selection on failure
+        state.lockToken = null;
+        sessionStorage.removeItem('seatLock');
+      })
+      .addCase(releaseSeats.fulfilled, (state) => {
+        sessionStorage.removeItem('seatLock');
       });
   },
 });
@@ -167,6 +206,7 @@ export const { toggleSeat, clearSelectedSeats, clearBookingError } = bookingSlic
 
 // Selectors
 export const selectSelectedSeats = (state) => state.booking.selectedSeats;
+export const selectLockToken = (state) => state.booking.lockToken;
 export const selectMyBookings = (state) => state.booking.myBookings;
 export const selectCurrentBooking = (state) => state.booking.currentBooking;
 export const selectBookingLoading = (state) => state.booking.isLoading;

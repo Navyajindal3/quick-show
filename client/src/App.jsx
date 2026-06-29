@@ -113,7 +113,7 @@ export default function App() {
               <AdminBookings />
             </ProtectedRoute>
           } />
-          <Route path="/admin/verify/:id" element={
+          <Route path="/verify-ticket" element={
             <ProtectedRoute adminOnly>
               <VerifyTicket />
             </ProtectedRoute>

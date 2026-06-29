@@ -12,9 +12,9 @@ const jwt = require('jsonwebtoken');
 const generateQRCode = async (bookingId, userId) => {
   try {
     const ticketToken = jwt.sign(
-      { bookingId, userId },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
+      { bookingId, userId, type: 'movie-ticket' },
+      process.env.TICKET_JWT_SECRET,
+      { expiresIn: '30d', issuer: 'quickshow', audience: 'theatre-admin' }
     );
 
     const qrData = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;

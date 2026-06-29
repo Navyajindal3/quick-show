@@ -1,8 +1,8 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchShowById, selectCurrentShow } from '../../redux/slices/movieSlice';
-import { selectSelectedSeats, createRazorpayOrder, verifyRazorpayPayment, selectBookingLoading, releaseSeats } from '../../redux/slices/bookingSlice';
+import { selectSelectedSeats, createRazorpayOrder, verifyRazorpayPayment, selectBookingLoading, releaseSeats, selectLockToken } from '../../redux/slices/bookingSlice';
 import { selectCurrentUser } from '../../redux/slices/authSlice';
 import Spinner from '../../components/common/Spinner';
 import { ArrowLeft, MapPin, Clock, Ticket, CreditCard, Shield, AlertTriangle } from 'lucide-react';
@@ -15,8 +15,11 @@ export default function Checkout() {
 
   const show = useSelector(selectCurrentShow);
   const selectedSeats = useSelector(selectSelectedSeats);
+  const lockToken = useSelector(selectLockToken);
   const isLoading = useSelector(selectBookingLoading);
   const user = useSelector(selectCurrentUser);
+
+  const [isLockExpired, setIsLockExpired] = useState(false);
 
   useEffect(() => {
     dispatch(fetchShowById(showId));
@@ -24,18 +27,43 @@ export default function Checkout() {
     if (selectedSeats.length === 0) {
       navigate(`/seat-selection/${showId}`);
     }
+
+    // Check lock expiration dynamically
+    const storedLock = sessionStorage.getItem('seatLock');
+    if (storedLock) {
+      try {
+        const { expiresAt } = JSON.parse(storedLock);
+        if (expiresAt) {
+          const expirationTime = new Date(expiresAt).getTime();
+          const checkExpiration = () => {
+            if (Date.now() > expirationTime) {
+              setIsLockExpired(true);
+            } else {
+              setIsLockExpired(false);
+            }
+          };
+          checkExpiration();
+          const interval = setInterval(checkExpiration, 1000);
+          return () => clearInterval(interval);
+        }
+      } catch (e) {
+        setIsLockExpired(true);
+      }
+    } else {
+      setIsLockExpired(true);
+    }
   }, [dispatch, showId, navigate, selectedSeats.length]);
 
   const handleGoBack = async () => {
     // Release locked seats when user cancels
-    if (selectedSeats.length > 0) {
-      await dispatch(releaseSeats({ showId, seatLabels: selectedSeats }));
+    if (selectedSeats.length > 0 && lockToken) {
+      await dispatch(releaseSeats({ showId, seatLabels: selectedSeats, lockToken }));
     }
     navigate(`/seat-selection/${showId}`);
   };
 
   const handlePayment = async () => {
-    const orderResult = await dispatch(createRazorpayOrder({ showId, seatLabels: selectedSeats }));
+    const orderResult = await dispatch(createRazorpayOrder({ showId, seatLabels: selectedSeats, lockToken }));
     
     if (createRazorpayOrder.fulfilled.match(orderResult)) {
       const { order, bookingId } = orderResult.payload;
@@ -215,12 +243,16 @@ export default function Checkout() {
               <button
                 id="pay-now-btn"
                 onClick={handlePayment}
-                disabled={isLoading}
+                disabled={isLoading || isLockExpired}
                 className="btn-primary"
-                style={{ width: '100%', padding: '16px', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                style={{
+                  width: '100%', padding: '16px', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                  opacity: isLockExpired ? 0.5 : 1, cursor: isLockExpired ? 'not-allowed' : 'pointer',
+                  backgroundColor: isLockExpired ? '#555' : undefined
+                }}
               >
                 <CreditCard size={18} />
-                {isLoading ? 'Processing...' : 'Pay Now'}
+                {isLoading ? 'Processing...' : isLockExpired ? 'Lock Expired' : 'Pay Now'}
               </button>
 
               <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', marginTop: 12 }}>
@@ -229,12 +261,12 @@ export default function Checkout() {
 
               {/* Lock warning */}
               <div style={{
-                marginTop: 16, background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.2)',
+                marginTop: 16, background: isLockExpired ? 'rgba(239,68,68,0.1)' : 'rgba(245,158,11,0.1)', border: isLockExpired ? '1px solid rgba(239,68,68,0.2)' : '1px solid rgba(245,158,11,0.2)',
                 borderRadius: 10, padding: '10px 14px', display: 'flex', gap: 8, alignItems: 'flex-start',
               }}>
-                <AlertTriangle size={14} color="#fbbf24" style={{ flexShrink: 0, marginTop: 2 }} />
-                <p style={{ fontSize: 11, color: '#fbbf24', lineHeight: 1.5 }}>
-                  Your seats are temporarily locked for 10 minutes. Complete payment to confirm.
+                <AlertTriangle size={14} color={isLockExpired ? '#ef4444' : '#fbbf24'} style={{ flexShrink: 0, marginTop: 2 }} />
+                <p style={{ fontSize: 11, color: isLockExpired ? '#ef4444' : '#fbbf24', lineHeight: 1.5 }}>
+                  {isLockExpired ? 'Your seat reservation has expired. Please go back and select seats again.' : 'Your seats are temporarily locked for 10 minutes. Complete payment to confirm.'}
                 </p>
               </div>
             </div>
