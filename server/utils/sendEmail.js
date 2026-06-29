@@ -1,22 +1,21 @@
+const { generateQRBuffer } = require('./generateQR');
 const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, ticketToken }) => {
+const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, ticketToken, idempotencyKey }) => {
   try {
     if (!ticketToken) {
       console.warn(`⚠️ Warning: No ticketToken provided for booking ${bookingId}`);
     }
     
+    // Generate the PNG buffer for the QR code
+    const qrBuffer = await generateQRBuffer(ticketToken);
+    
     // Construct the external QR URL for email clients (which block base64)
     const secureScanUrl = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;
-    const emailQrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(secureScanUrl)}`;
 
-    await resend.emails.send({
-      from: 'onboarding@resend.dev',
-      to: userEmail,
-      subject: `Your Tickets for ${movieName}`,
-      html: `<div style="font-family: Arial, sans-serif; background-color: #0A0D14; color: #FFFFFF; max-width: 600px; margin: 0 auto; border-radius: 8px; overflow: hidden;">
+    const emailHtml = `<div style="font-family: Arial, sans-serif; background-color: #0A0D14; color: #FFFFFF; max-width: 600px; margin: 0 auto; border-radius: 8px; overflow: hidden;">
   <!-- Header -->
   <div style="background-color: #DC2626; padding: 20px; text-align: center;">
     <h1 style="margin: 0; color: white; font-size: 24px;">🎬 QuickShow</h1>
@@ -45,12 +44,28 @@ const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, sh
     <div style="text-align: center; margin-top: 30px;">
       <p style="color: #9CA3AF; margin-bottom: 15px;">Show this QR code at the theatre entrance:</p>
       <div style="background-color: white; padding: 15px; display: inline-block; border-radius: 8px;">
-        <img src="${emailQrUrl}" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
+        <img src="cid:quickshow-ticket" alt="Ticket QR Code" width="200" height="200" style="display: block; border: none;" />
       </div>
       <p style="color: #9CA3AF; font-size: 12px; margin-top: 25px;">Please arrive 15 minutes before the show. Enjoy your movie! 🍿</p>
     </div>
   </div>
-</div>`
+</div>`;
+
+    await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: userEmail,
+      subject: `Your Tickets for ${movieName}`,
+      html: emailHtml,
+      attachments: [
+        {
+          filename: 'ticket-qr.png',
+          content: qrBuffer,
+          content_id: 'quickshow-ticket'
+        }
+      ],
+      headers: idempotencyKey ? {
+        'Idempotency-Key': idempotencyKey
+      } : {}
     });
     console.log(`✅ Ticket email sent via Resend to ${userEmail}`);
   } catch (error) {

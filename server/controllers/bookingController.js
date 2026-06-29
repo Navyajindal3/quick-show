@@ -139,14 +139,26 @@ const createOrder = async (req, res, next) => {
 
     // Atomic update to acquire order creation lock
     const updatedBooking = await Booking.findOneAndUpdate(
-      { _id: booking._id, orderCreationStatus: 'pending' },
-      { $set: { orderCreationStatus: 'in_progress' } },
+      { _id: booking._id, orderCreationStatus: { $in: ['pending', 'failed'] } },
+      { 
+        $set: { 
+          orderCreationStatus: 'in_progress',
+          orderCreationStartedAt: new Date(),
+          orderCreationAttemptId: Date.now().toString()
+        } 
+      },
       { new: true }
     );
 
+    const razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID.trim(),
+      key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
+    });
+
     if (!updatedBooking) {
-      // Re-fetch to see if it was completed by another request
+      // Re-fetch to see if it was completed by another request or is stale
       const existingBooking = await Booking.findById(booking._id);
+      
       if (existingBooking && existingBooking.razorpayOrderId) {
         return res.status(200).json({
           success: true,
@@ -157,18 +169,54 @@ const createOrder = async (req, res, next) => {
           bookingId: existingBooking._id,
         });
       }
-      // If still in_progress, return 202
+
+      // If it's still in_progress, check if it's stale (e.g. older than 15 seconds)
+      if (existingBooking && existingBooking.orderCreationStatus === 'in_progress') {
+        const startedAt = existingBooking.orderCreationStartedAt ? existingBooking.orderCreationStartedAt.getTime() : 0;
+        const now = Date.now();
+        if (now - startedAt > 15000) {
+          // Stale attempt. Let's reconcile with Razorpay using the receipt (booking._id)
+          try {
+            const orders = await razorpay.orders.all({ receipt: existingBooking._id.toString() });
+            if (orders && orders.items && orders.items.length > 0) {
+              const order = orders.items[0]; // Take the first matched order
+              existingBooking.razorpayOrderId = order.id;
+              existingBooking.orderCreationStatus = 'completed';
+              await existingBooking.save();
+              
+              return res.status(200).json({
+                success: true,
+                subtotal: existingBooking.subtotal,
+                convenienceFee: existingBooking.convenienceFee,
+                totalAmount: existingBooking.totalAmount,
+                order: { id: order.id, amount: order.amount, currency: order.currency },
+                bookingId: existingBooking._id,
+              });
+            } else {
+              // Order doesn't exist in Razorpay, safe to mark failed so it can be retried
+              await Booking.updateOne(
+                { _id: existingBooking._id, orderCreationStatus: 'in_progress' },
+                { $set: { orderCreationStatus: 'failed', orderCreationError: 'Stale attempt recovered, no Razorpay order found' } }
+              );
+              // Tell client to retry
+              return res.status(409).json({
+                success: false,
+                message: 'Previous order creation attempt timed out. Please try again.',
+              });
+            }
+          } catch (reconcileErr) {
+            console.error('Failed to reconcile Razorpay order:', reconcileErr);
+            return res.status(500).json({ success: false, message: 'Failed to verify payment status.' });
+          }
+        }
+      }
+
+      // If still fresh in_progress, return 202
       return res.status(202).json({
         success: true,
         message: 'Order creation is in progress. Please try again shortly.',
       });
     }
-
-    const razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID.trim(),
-      key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
-    });
-
     const options = {
       amount: totalAmount * 100, // Razorpay uses paise
       currency: 'INR',
@@ -213,7 +261,14 @@ const createOrder = async (req, res, next) => {
     }
 
     if (booking && booking._id) {
-      await Booking.updateOne({ _id: booking._id }, { paymentStatus: 'failed', orderCreationStatus: 'pending' });
+      await Booking.updateOne(
+        { _id: booking._id }, 
+        { 
+          paymentStatus: 'failed', 
+          orderCreationStatus: 'failed',
+          orderCreationError: error.message || 'Unknown error during Razorpay order creation'
+        }
+      );
     }
     
     // Release locks only if we are absolutely sure the booking failed completely
@@ -513,6 +568,32 @@ const razorpayWebhook = async (req, res, next) => {
       }
 
       await finalizeSuccessfulPayment({ bookingId: booking._id, razorpayPaymentId: paymentEntity.id });
+    } else if (payload.event.startsWith('refund.')) {
+      const refundEntity = payload.payload.refund.entity;
+      const paymentId = refundEntity.payment_id;
+      
+      const booking = await Booking.findOne({ razorpayPaymentId: paymentId });
+      
+      if (booking) {
+        if (payload.event === 'refund.created') {
+          await Booking.updateOne({ _id: booking._id }, { 
+            refundStatus: 'pending', 
+            refundId: refundEntity.id 
+          });
+        } else if (payload.event === 'refund.processed') {
+          await Booking.updateOne({ _id: booking._id }, { 
+            refundStatus: 'processed', 
+            refundId: refundEntity.id,
+            refundProcessedAt: new Date()
+          });
+        } else if (payload.event === 'refund.failed') {
+          await Booking.updateOne({ _id: booking._id }, { 
+            refundStatus: 'failed', 
+            refundId: refundEntity.id,
+            refundFailureReason: refundEntity.status || 'Webhook failure'
+          });
+        }
+      }
     }
 
     res.status(200).send('OK');

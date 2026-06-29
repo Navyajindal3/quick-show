@@ -34,10 +34,11 @@ const { releaseOwnedLocks } = require('../utils/redisHelpers');
 const { finalizeSuccessfulPayment, ensureBookingFulfillment } = require('../services/paymentService');
 
 // Mock Razorpay
+const mockRazorpayOrderCreate = jest.fn().mockResolvedValue({ id: 'order_123', amount: 10000, currency: 'INR' });
 jest.mock('razorpay', () => {
   return jest.fn().mockImplementation(() => ({
     orders: {
-      create: jest.fn().mockResolvedValue({ id: 'order_123', amount: 10000, currency: 'INR' }),
+      create: mockRazorpayOrderCreate,
     },
   }));
 });
@@ -48,6 +49,8 @@ describe('Booking Architecture & Concurrency', () => {
   let show, userToken, userId, adminToken;
 
   beforeEach(async () => {
+    mockRazorpayOrderCreate.mockClear();
+    
     const user = await User.create({ name: 'Test User', email: 'test@test.com', password: 'password123', role: 'user' });
     userId = user._id;
     global.testUserId = userId; // pass to middleware mock
@@ -117,6 +120,13 @@ describe('Booking Architecture & Concurrency', () => {
       if (res1.status === 200 && res2.status === 200) {
         expect(res1.body.bookingId).toBe(res2.body.bookingId);
       }
+
+      // Assert that exactly one Razorpay order was created
+      expect(mockRazorpayOrderCreate).toHaveBeenCalledTimes(1);
+
+      // Assert that exactly one Booking document exists in the database for this user/show combination
+      const bookingsCount = await Booking.countDocuments({ show: show._id, user: userId });
+      expect(bookingsCount).toBe(1);
     });
   });
 
@@ -192,7 +202,8 @@ describe('Booking Architecture & Concurrency', () => {
       expect(result.success).toBe(true);
 
       const updatedBooking = await Booking.findById(booking._id);
-      expect(updatedBooking.qrCodeUrl).toBeTruthy();
+      expect(updatedBooking.qrStatus).toBe('generated');
+      expect(updatedBooking.confirmationEmailSentAt).toBeTruthy();
     });
   });
 });

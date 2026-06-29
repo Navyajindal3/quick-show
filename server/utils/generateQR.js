@@ -13,21 +13,18 @@ const generateTicketToken = (bookingId, userId) => {
 };
 
 /**
- * Generates a QR code as a Base64 data URL string.
+ * Generates a QR code as a raw PNG Buffer.
  * The QR code encodes booking information for ticket verification.
  *
- * @param {string} bookingId - The MongoDB booking document ID
- * @param {string} userId - The MongoDB user document ID
- * @returns {Promise<string>} - Base64 PNG data URL of the QR code
+ * @param {string} ticketToken - The secure ticket token
+ * @returns {Promise<Buffer>} - PNG Buffer of the QR code
  */
-const generateQRCode = async (bookingId, userId) => {
+const generateQRBuffer = async (ticketToken) => {
   try {
-    const ticketToken = generateTicketToken(bookingId, userId);
-
     const qrData = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;
 
-    // Generate as data URL (base64 PNG) - easy to embed in HTML/email
-    const qrCodeDataUrl = await QRCode.toDataURL(qrData, {
+    // Generate as raw Buffer
+    const qrBuffer = await QRCode.toBuffer(qrData, {
       width: 300,
       margin: 2,
       color: {
@@ -36,11 +33,11 @@ const generateQRCode = async (bookingId, userId) => {
       },
     });
 
-    return qrCodeDataUrl;
+    return qrBuffer;
   } catch (error) {
-    console.error('QR Code generation failed:', error);
-    throw new Error('Failed to generate QR code');
+    console.error('QR Code Buffer generation failed:', error);
+    throw new Error('Failed to generate QR code buffer');
   }
 };
 
-module.exports = { generateQRCode, generateTicketToken };
+module.exports = { generateQRBuffer, generateTicketToken };

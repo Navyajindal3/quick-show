@@ -3,7 +3,7 @@ const Booking = require('../models/Booking');
 const Show = require('../models/Show');
 const redis = require('../config/redis');
 const { sendTicketEmail } = require('../utils/sendEmail');
-const { generateTicketToken, generateQRCode } = require('../utils/generateQR');
+const { generateTicketToken } = require('../utils/generateQR');
 const Razorpay = require('razorpay');
 const { releaseOwnedLocks } = require('../utils/redisHelpers');
 
@@ -114,23 +114,39 @@ const finalizeSuccessfulPayment = async ({ bookingId, razorpayPaymentId }) => {
           key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
         });
         
-        await Booking.updateOne({ _id: result.booking._id }, { refundStatus: 'pending' });
+        const idempotencyKey = `quickshow-refund-${result.booking._id}`;
+        await Booking.updateOne(
+          { _id: result.booking._id }, 
+          { 
+            refundStatus: 'pending', 
+            refundRequestedAt: new Date(),
+            refundIdempotencyKey: idempotencyKey
+          }
+        );
         
         const refund = await razorpay.payments.refund(razorpayPaymentId, {
           amount: result.booking.totalAmount * 100,
           speed: 'optimum'
+        }, {
+          headers: {
+            'X-Refund-Idempotency': idempotencyKey
+          }
         });
         
+        // Let the webhook handle final processed state, but record the ID
         await Booking.updateOne(
           { _id: result.booking._id }, 
-          { refundStatus: 'completed', refundId: refund.id }
+          { refundId: refund.id }
         );
-        console.log(`✅ Refund successful for booking ${result.booking._id}. Refund ID: ${refund.id}`);
+        console.log(`✅ Refund requested for booking ${result.booking._id}. Refund ID: ${refund.id}. Waiting for webhook.`);
       } catch (refundError) {
         console.error(`❌ Refund failed for booking ${result.booking._id}. Admin intervention required.`, refundError);
         await Booking.updateOne(
           { _id: result.booking._id }, 
-          { refundStatus: 'failed' }
+          { 
+            refundStatus: 'failed',
+            refundFailureReason: refundError.message || 'Unknown error'
+          }
         );
       }
     }
@@ -150,37 +166,52 @@ const ensureBookingFulfillment = async (bookingId) => {
   if (booking.paymentStatus === 'paid' && booking.fulfillmentStatus !== 'refund_required') {
     let updated = false;
 
-    // 1. Generate QR Code
+    // 1. Mark QR as generated (QR is now generated on-the-fly during email sending)
     if (!booking.qrGeneratedAt) {
-      booking.qrCodeUrl = await generateQRCode(booking._id, booking.user._id);
       booking.qrGeneratedAt = new Date();
+      booking.qrStatus = 'generated';
       updated = true;
     }
 
-    // 2. Send Email
+    // 2. Send Email Atomically
     if (!booking.confirmationEmailSentAt && booking.user && booking.user.email) {
-      const ticketToken = generateTicketToken(booking._id, booking.user._id);
-      
-      const emailParams = {
-        userName: booking.user.name,
-        movieName: booking.bookingSnapshot?.movieTitle,
-        theatreName: booking.bookingSnapshot?.theatreName,
-        showTime: booking.bookingSnapshot?.showTime ? new Date(booking.bookingSnapshot.showTime).toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'N/A',
-        screenName: booking.bookingSnapshot?.screenNumber,
-        seatsList: booking.seatsSelected?.join(', '),
-        amountPaid: booking.totalAmount,
-        bookingId: booking._id,
-        ticketToken, // pass the secure token to email generator
-        userId: booking.user._id
-      };
-      
-      try {
-        await sendTicketEmail(booking.user.email, emailParams);
-        booking.confirmationEmailSentAt = new Date();
-        updated = true;
-      } catch (err) {
-        console.error('Failed to send confirmation email', err);
-        // Do not throw, allow retry later
+      const claimedBooking = await Booking.findOneAndUpdate(
+        { _id: bookingId, emailStatus: { $in: ['pending', 'failed'] } },
+        { $set: { emailStatus: 'sending' } },
+        { new: true }
+      );
+
+      if (claimedBooking) {
+        const ticketToken = generateTicketToken(booking._id, booking.user._id);
+        const idempotencyKey = `booking-confirmation-${booking._id}`;
+        
+        const emailParams = {
+          userName: booking.user.name,
+          movieName: booking.bookingSnapshot?.movieTitle,
+          theatreName: booking.bookingSnapshot?.theatreName,
+          showTime: booking.bookingSnapshot?.showTime ? new Date(booking.bookingSnapshot.showTime).toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'N/A',
+          screenName: booking.bookingSnapshot?.screenNumber,
+          seatsList: booking.seatsSelected?.join(', '),
+          amountPaid: booking.totalAmount,
+          bookingId: booking._id,
+          ticketToken,
+          idempotencyKey,
+          userId: booking.user._id
+        };
+        
+        try {
+          await sendTicketEmail(booking.user.email, emailParams);
+          claimedBooking.confirmationEmailSentAt = new Date();
+          claimedBooking.emailStatus = 'sent';
+          await claimedBooking.save();
+          booking.confirmationEmailSentAt = claimedBooking.confirmationEmailSentAt;
+          updated = true;
+        } catch (err) {
+          console.error('Failed to send confirmation email', err);
+          claimedBooking.emailStatus = 'failed';
+          await claimedBooking.save();
+          // Do not throw, allow retry later
+        }
       }
     }
 

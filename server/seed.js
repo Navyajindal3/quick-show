@@ -11,6 +11,13 @@ const dotenv = require('dotenv');
 
 dotenv.config(); // Loads .env from current directory (server/)
 
+const { SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD } = process.env;
+
+if (!SEED_ADMIN_EMAIL || !SEED_ADMIN_PASSWORD) {
+  console.error('❌ SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD must be provided in the environment or .env file to run the seed script safely.');
+  process.exit(1);
+}
+
 const User = require('./models/User');
 const Movie = require('./models/Movie');
 const Theatre = require('./models/Theatre');
@@ -33,20 +40,16 @@ const seed = async () => {
   console.log('✅ Connected to MongoDB');
 
   // ─── Admin User ────────────────────────────────────────────────────────
-  const existingAdmin = await User.findOne({ email: 'admin@quickshow.com' });
-  let adminPassword = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(8).toString('hex');
+  const existingAdmin = await User.findOne({ email: SEED_ADMIN_EMAIL });
   
   if (!existingAdmin) {
     await User.create({
       name: 'Admin User',
-      email: 'admin@quickshow.com',
-      password: adminPassword,
+      email: SEED_ADMIN_EMAIL,
+      password: SEED_ADMIN_PASSWORD,
       role: 'admin',
     });
-    console.log(`👤 Admin user created: admin@quickshow.com / ${adminPassword}`);
-    if (!process.env.SEED_ADMIN_PASSWORD) {
-      console.log('⚠️  A random password was generated. Please save it securely!');
-    }
+    console.log(`👤 Admin user created: ${SEED_ADMIN_EMAIL}`);
   } else {
     console.log('👤 Admin already exists, skipping...');
   }
@@ -165,7 +168,7 @@ const seed = async () => {
 
   console.log('\n✨ Seeding complete!');
   console.log('─────────────────────────────────────────');
-  console.log('🔐 Admin Login: admin@quickshow.com / [Check logs above for password]');
+  console.log(`🔐 Admin Login: ${SEED_ADMIN_EMAIL}`);
   console.log('🌐 Frontend:   http://localhost:5173');
   console.log('🚀 Backend:    http://localhost:5000');
   console.log('─────────────────────────────────────────\n');
