@@ -125,6 +125,7 @@ const createOrder = async (req, res, next) => {
         convenienceFee,
         totalAmount,
         paymentStatus: 'pending',
+        orderCreationStatus: 'pending',
         lockToken,
         lockExpiresAt,
         bookingSnapshot: {
@@ -133,6 +134,33 @@ const createOrder = async (req, res, next) => {
           showTime: show.showTime,
           screenNumber: show.screenNumber,
         },
+      });
+    }
+
+    // Atomic update to acquire order creation lock
+    const updatedBooking = await Booking.findOneAndUpdate(
+      { _id: booking._id, orderCreationStatus: 'pending' },
+      { $set: { orderCreationStatus: 'in_progress' } },
+      { new: true }
+    );
+
+    if (!updatedBooking) {
+      // Re-fetch to see if it was completed by another request
+      const existingBooking = await Booking.findById(booking._id);
+      if (existingBooking && existingBooking.razorpayOrderId) {
+        return res.status(200).json({
+          success: true,
+          subtotal: existingBooking.subtotal,
+          convenienceFee: existingBooking.convenienceFee,
+          totalAmount: existingBooking.totalAmount,
+          order: { id: existingBooking.razorpayOrderId, amount: existingBooking.totalAmount * 100, currency: 'INR' },
+          bookingId: existingBooking._id,
+        });
+      }
+      // If still in_progress, return 202
+      return res.status(202).json({
+        success: true,
+        message: 'Order creation is in progress. Please try again shortly.',
       });
     }
 
@@ -149,8 +177,9 @@ const createOrder = async (req, res, next) => {
 
     const order = await razorpay.orders.create(options);
 
-    booking.razorpayOrderId = order.id;
-    await booking.save();
+    updatedBooking.razorpayOrderId = order.id;
+    updatedBooking.orderCreationStatus = 'completed';
+    await updatedBooking.save();
 
     res.status(200).json({
       success: true,
@@ -158,15 +187,40 @@ const createOrder = async (req, res, next) => {
       convenienceFee,
       totalAmount,
       order,
-      bookingId: booking._id,
+      bookingId: updatedBooking._id,
     });
   } catch (error) {
     console.error('DEBUG ERROR:', error);
-    if (booking) {
-      booking.paymentStatus = 'failed';
-      await booking.save();
+    
+    // Only release lock if THIS request failed before saving order
+    // Check if it's a duplicate key error on lockToken, indicating we lost the creation race
+    if (error.code === 11000 && error.keyPattern && error.keyPattern.lockToken) {
+      const existingBooking = await Booking.findOne({ lockToken });
+      if (existingBooking && existingBooking.razorpayOrderId) {
+        return res.status(200).json({
+          success: true,
+          subtotal: existingBooking.subtotal,
+          convenienceFee: existingBooking.convenienceFee,
+          totalAmount: existingBooking.totalAmount,
+          order: { id: existingBooking.razorpayOrderId, amount: existingBooking.totalAmount * 100, currency: 'INR' },
+          bookingId: existingBooking._id,
+        });
+      }
+      return res.status(202).json({
+        success: true,
+        message: 'Order creation is in progress by another request.',
+      });
     }
-    await releaseOwnedLocks(showId, seatLabels, lockToken);
+
+    if (booking && booking._id) {
+      await Booking.updateOne({ _id: booking._id }, { paymentStatus: 'failed', orderCreationStatus: 'pending' });
+    }
+    
+    // Release locks only if we are absolutely sure the booking failed completely
+    // For safety, we only release if we successfully created it (not 11000)
+    if (error.code !== 11000) {
+      await releaseOwnedLocks(showId, seatLabels, lockToken);
+    }
 
     if (error.statusCode === 401) {
       error.statusCode = 500;

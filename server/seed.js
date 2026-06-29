@@ -6,6 +6,7 @@
  */
 
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const dotenv = require('dotenv');
 
 dotenv.config(); // Loads .env from current directory (server/)
@@ -33,14 +34,19 @@ const seed = async () => {
 
   // ─── Admin User ────────────────────────────────────────────────────────
   const existingAdmin = await User.findOne({ email: 'admin@quickshow.com' });
+  let adminPassword = process.env.SEED_ADMIN_PASSWORD || crypto.randomBytes(8).toString('hex');
+  
   if (!existingAdmin) {
     await User.create({
       name: 'Admin User',
       email: 'admin@quickshow.com',
-      password: 'admin123',
+      password: adminPassword,
       role: 'admin',
     });
-    console.log('👤 Admin user created: admin@quickshow.com / admin123');
+    console.log(`👤 Admin user created: admin@quickshow.com / ${adminPassword}`);
+    if (!process.env.SEED_ADMIN_PASSWORD) {
+      console.log('⚠️  A random password was generated. Please save it securely!');
+    }
   } else {
     console.log('👤 Admin already exists, skipping...');
   }
@@ -159,7 +165,7 @@ const seed = async () => {
 
   console.log('\n✨ Seeding complete!');
   console.log('─────────────────────────────────────────');
-  console.log('🔐 Admin Login: admin@quickshow.com / admin123');
+  console.log('🔐 Admin Login: admin@quickshow.com / [Check logs above for password]');
   console.log('🌐 Frontend:   http://localhost:5173');
   console.log('🚀 Backend:    http://localhost:5000');
   console.log('─────────────────────────────────────────\n');

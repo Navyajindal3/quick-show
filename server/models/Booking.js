@@ -41,11 +41,24 @@ const bookingSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'failed'],
       default: 'pending',
     },
+    orderCreationStatus: {
+      type: String,
+      enum: ['pending', 'in_progress', 'completed'],
+      default: 'pending',
+    },
     fulfillmentStatus: {
       type: String,
       enum: ['pending', 'fulfilled', 'refund_required'],
       default: 'pending',
     },
+    qrGeneratedAt: Date,
+    confirmationEmailSentAt: Date,
+    refundStatus: {
+      type: String,
+      enum: ['none', 'pending', 'completed', 'failed'],
+      default: 'none',
+    },
+    refundId: String,
     lockToken: {
       type: String,
       unique: true,

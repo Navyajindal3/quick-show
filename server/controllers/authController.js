@@ -30,10 +30,9 @@ const register = async (req, res, next) => {
       name,
       email,
       password,
-      // Only allow 'admin' role if a special admin key is provided (security measure)
-      role: role === 'admin' && req.body.adminKey === process.env.ADMIN_CREATION_KEY
-        ? 'admin'
-        : 'user',
+      // Hardcode 'user' role for public registration to prevent privilege escalation.
+      // Admin creation must be handled via a secure internal script.
+      role: 'user',
     });
 
     const token = generateToken(user._id);

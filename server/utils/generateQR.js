@@ -2,6 +2,17 @@ const QRCode = require('qrcode');
 const jwt = require('jsonwebtoken');
 
 /**
+ * Generates the secure JWT token for a ticket.
+ */
+const generateTicketToken = (bookingId, userId) => {
+  return jwt.sign(
+    { bookingId, userId, type: 'movie-ticket' },
+    process.env.TICKET_JWT_SECRET,
+    { expiresIn: '30d', issuer: 'quickshow', audience: 'theatre-admin' }
+  );
+};
+
+/**
  * Generates a QR code as a Base64 data URL string.
  * The QR code encodes booking information for ticket verification.
  *
@@ -11,11 +22,7 @@ const jwt = require('jsonwebtoken');
  */
 const generateQRCode = async (bookingId, userId) => {
   try {
-    const ticketToken = jwt.sign(
-      { bookingId, userId, type: 'movie-ticket' },
-      process.env.TICKET_JWT_SECRET,
-      { expiresIn: '30d', issuer: 'quickshow', audience: 'theatre-admin' }
-    );
+    const ticketToken = generateTicketToken(bookingId, userId);
 
     const qrData = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;
 
@@ -36,4 +43,4 @@ const generateQRCode = async (bookingId, userId) => {
   }
 };
 
-module.exports = generateQRCode;
+module.exports = { generateQRCode, generateTicketToken };

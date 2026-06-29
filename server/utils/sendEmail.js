@@ -1,16 +1,12 @@
 const { Resend } = require('resend');
-const jwt = require('jsonwebtoken');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, qrCodeUrl, userId }) => {
+const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, ticketToken }) => {
   try {
-    // Generate the secure token for the QR code
-    const ticketToken = jwt.sign(
-      { bookingId, userId },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    if (!ticketToken) {
+      console.warn(`⚠️ Warning: No ticketToken provided for booking ${bookingId}`);
+    }
     
     // Construct the external QR URL for email clients (which block base64)
     const secureScanUrl = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;

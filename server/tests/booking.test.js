@@ -97,21 +97,26 @@ describe('Booking Architecture & Concurrency', () => {
       const lockToken = 'my-secret-lock-token-2';
       await redis.set(`lock:show_${show._id}:seat_A1`, lockToken, 'EX', 100);
 
-      const res1 = await request(app)
+      const req1 = request(app)
         .post('/api/bookings/create-order')
         .set('Authorization', userToken)
         .send({ showId: show._id, seatLabels: ['A1'], lockToken });
 
-      expect(res1.status).toBe(200);
-
-      const res2 = await request(app)
+      const req2 = request(app)
         .post('/api/bookings/create-order')
         .set('Authorization', userToken)
         .send({ showId: show._id, seatLabels: ['A1'], lockToken });
 
-      expect(res2.status).toBe(200);
-      expect(res2.body.alreadyCreated).toBe(true);
-      expect(res2.body.bookingId).toBe(res1.body.bookingId);
+      const [res1, res2] = await Promise.all([req1, req2]);
+
+      // Both should succeed, but one might return 202 (in progress) or 200 (completed)
+      expect([200, 202]).toContain(res1.status);
+      expect([200, 202]).toContain(res2.status);
+      
+      // If both are 200, they must share the same booking ID (and razorpay order ID from mock)
+      if (res1.status === 200 && res2.status === 200) {
+        expect(res1.body.bookingId).toBe(res2.body.bookingId);
+      }
     });
   });
 
