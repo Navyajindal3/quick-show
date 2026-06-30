@@ -1,25 +1,48 @@
-const mongoose = require('mongoose');
+'use strict';
 
 /**
  * Booking Schema
- * Created when a user selects seats. Initially pending until payment is confirmed.
- * On payment success: status → 'paid', seats permanently booked, QR code generated.
+ * ==============
+ * Represents a user's movie ticket booking.
+ *
+ * State machine (paymentStatus):
+ *   pending → paid → cancelled / refund_pending → refunded / refund_failed
+ *           → failed
+ *
+ * State machine (fulfillmentStatus):
+ *   pending → email_queued → fulfilled
+ *           → refund_required
+ *           → failed
+ *
+ * Rules enforced here:
+ *   - razorpayOrderId, razorpayPaymentId, lockToken, refundId are all
+ *     unique sparse indexes — prevents duplicate payment/refund processing.
+ *   - paymentStatus enum is the single source of truth for booking state.
  */
+
+const mongoose = require('mongoose');
+
 const bookingSchema = new mongoose.Schema(
   {
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: [true, 'User reference is required'],
+      index: true,
     },
     show: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Show',
       required: [true, 'Show reference is required'],
+      index: true,
     },
     seatsSelected: {
-      type: [String], // e.g., ['A1', 'A2', 'B3']
+      type: [String],
       required: [true, 'At least one seat must be selected'],
+      validate: {
+        validator: (v) => Array.isArray(v) && v.length > 0,
+        message: 'At least one seat must be selected',
+      },
     },
     subtotal: {
       type: Number,
@@ -36,11 +59,16 @@ const bookingSchema = new mongoose.Schema(
       required: [true, 'Total amount is required'],
       min: 0,
     },
+
+    // ─── Payment state machine ─────────────────────────────────────────────
     paymentStatus: {
       type: String,
-      enum: ['pending', 'paid', 'failed'],
+      enum: ['pending', 'paid', 'failed', 'cancelled', 'refund_pending', 'refunded', 'refund_failed'],
       default: 'pending',
+      index: true,
     },
+
+    // ─── Order creation ────────────────────────────────────────────────────
     orderCreationStatus: {
       type: String,
       enum: ['pending', 'in_progress', 'completed', 'failed'],
@@ -49,27 +77,37 @@ const bookingSchema = new mongoose.Schema(
     orderCreationStartedAt: Date,
     orderCreationAttemptId: String,
     orderCreationError: String,
+
+    // ─── Fulfillment state ─────────────────────────────────────────────────
     fulfillmentStatus: {
       type: String,
-      enum: ['pending', 'fulfilled', 'refund_required'],
+      enum: ['pending', 'email_queued', 'fulfilled', 'refund_required', 'failed'],
       default: 'pending',
+      index: true,
     },
+
     emailStatus: {
       type: String,
-      enum: ['pending', 'sending', 'sent', 'failed'],
+      enum: ['pending', 'queued', 'sending', 'sent', 'failed'],
       default: 'pending',
+      index: true,
     },
+
     qrStatus: {
       type: String,
-      enum: ['pending', 'generating', 'generated', 'failed'],
+      enum: ['pending', 'generated', 'failed'],
       default: 'pending',
     },
     qrGeneratedAt: Date,
     confirmationEmailSentAt: Date,
+    paidAt: Date,
+
+    // ─── Refund tracking ───────────────────────────────────────────────────
     refundStatus: {
       type: String,
-      enum: ['none', 'pending', 'processed', 'failed'],
+      enum: ['none', 'pending', 'processing', 'processed', 'failed'],
       default: 'none',
+      index: true,
     },
     refundId: {
       type: String,
@@ -77,17 +115,24 @@ const bookingSchema = new mongoose.Schema(
       sparse: true,
     },
     refundIdempotencyKey: String,
-    refundFailureReason: String,
+    refundFailureReason: {
+      type: String,
+      maxlength: 500, // Avoid logging large error blobs
+    },
     refundRequestedAt: Date,
     refundProcessedAt: Date,
+    refundAmount: Number,
+    refundAttemptCount: { type: Number, default: 0 },
+
+    // ─── Seat lock metadata ────────────────────────────────────────────────
     lockToken: {
       type: String,
       unique: true,
       sparse: true,
     },
-    lockExpiresAt: {
-      type: Date,
-    },
+    lockExpiresAt: Date,
+
+    // ─── Razorpay IDs ──────────────────────────────────────────────────────
     razorpayOrderId: {
       type: String,
       unique: true,
@@ -98,33 +143,39 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       unique: true,
       sparse: true,
+      index: true,
     },
-    qrCodeUrl: {
-      type: String,
-      default: null, // Base64 data URL of the QR code image
-    },
+
+    // ─── Ticket scanning ───────────────────────────────────────────────────
     isScanned: {
       type: Boolean,
-      default: false, // Tracks if the QR code has been verified by the theatre admin
+      default: false,
     },
     scannedAt: Date,
     scannedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
     },
-    // Snapshot of movie/show info at booking time (for receipt display even if show is deleted)
+
+    // ─── Snapshot for receipts (survives show deletion) ────────────────────
     bookingSnapshot: {
       movieTitle: String,
       theatreName: String,
       showTime: Date,
       screenNumber: Number,
-      ticketPrice: Number,
     },
+
+    // ─── Audit timestamps ──────────────────────────────────────────────────
+    cancelledAt: Date,
+    cancelReason: { type: String, maxlength: 200 },
   },
   { timestamps: true }
 );
 
-// Index for fetching user's bookings quickly
+// ─── Compound indexes ──────────────────────────────────────────────────────────
 bookingSchema.index({ user: 1, createdAt: -1 });
+bookingSchema.index({ paymentStatus: 1, fulfillmentStatus: 1 });
+bookingSchema.index({ paymentStatus: 1, emailStatus: 1 });
+bookingSchema.index({ paymentStatus: 1, refundStatus: 1 });
 
 module.exports = mongoose.model('Booking', bookingSchema);

@@ -1,39 +1,76 @@
+'use strict';
+
+/**
+ * Payment Service
+ * ===============
+ * Handles payment finalization atomically and durably.
+ *
+ * Design principles:
+ *   1. Verify payment/webhook signature BEFORE calling this service.
+ *   2. The MongoDB transaction ONLY writes booking + show seat state + job record.
+ *      NO external API calls (email, Razorpay) happen inside the transaction.
+ *   3. After committing, enqueue a FulfillmentJob so the worker processes
+ *      email/refund asynchronously and with retries.
+ *   4. All state transitions are idempotent — safe to call multiple times.
+ */
+
 const mongoose = require('mongoose');
 const Booking = require('../models/Booking');
 const Show = require('../models/Show');
+const FulfillmentJob = require('../models/FulfillmentJob');
 const redis = require('../config/redis');
-const { sendTicketEmail } = require('../utils/sendEmail');
-const { generateTicketToken } = require('../utils/generateQR');
-const Razorpay = require('razorpay');
 const { releaseOwnedLocks } = require('../utils/redisHelpers');
 
+/**
+ * Finalize a successful Razorpay payment.
+ *
+ * @param {{ bookingId: string|ObjectId, razorpayPaymentId: string }} params
+ * @returns {{ processedNow: boolean, alreadyProcessed: boolean, refundRequired: boolean }}
+ */
 const finalizeSuccessfulPayment = async ({ bookingId, razorpayPaymentId }) => {
   const session = await mongoose.startSession();
   let result = null;
 
   try {
     await session.withTransaction(async () => {
-      // 1. Find the Booking only if it is still pending
-      const booking = await Booking.findOne({
-        _id: bookingId,
-        paymentStatus: 'pending',
-      }).populate('user', 'name email').session(session);
+      // ── Step 1: Load booking and check for idempotency ──────────────────
+      const booking = await Booking.findById(bookingId)
+        .populate('user', 'name email')
+        .session(session);
 
       if (!booking) {
-        // Booking might already be paid or failed
-        const existingBooking = await Booking.findById(bookingId).populate('user', 'name email').session(session);
-        if (existingBooking && (existingBooking.paymentStatus === 'paid' || existingBooking.paymentStatus === 'SUCCESS')) {
-          result = { booking: existingBooking, processedNow: false, alreadyProcessed: true };
-          return;
-        }
-        throw new Error('Booking not found or in invalid state');
+        throw new Error(`Booking ${bookingId} not found`);
       }
 
-      // 2. Validate Razorpay order ID (already validated in controller, but good to be safe)
+      // Already paid — idempotent return
+      if (booking.paymentStatus === 'paid') {
+        result = {
+          processedNow: false,
+          alreadyProcessed: true,
+          refundRequired: booking.fulfillmentStatus === 'refund_required',
+        };
+        return;
+      }
 
-      // 2.5 Verify booking.lockToken ownership in Redis immediately before payment finalization
-      // Use an atomic Lua script to verify all locks simultaneously and extend them briefly 
-      // (fencing) to ensure they don't expire mid-transaction.
+      if (booking.paymentStatus !== 'pending') {
+        throw new Error(
+          `Booking ${bookingId} is in invalid state '${booking.paymentStatus}' for payment finalization`
+        );
+      }
+
+      // Guard against the same payment ID being attached to a different booking
+      const duplicatePayment = await Booking.findOne({
+        razorpayPaymentId,
+        _id: { $ne: bookingId },
+      }).session(session);
+      if (duplicatePayment) {
+        throw new Error(
+          `Payment ${razorpayPaymentId} is already attached to booking ${duplicatePayment._id}`
+        );
+      }
+
+      // ── Step 2: Verify lock ownership in Redis ───────────────────────────
+      // Extend locks briefly to survive the transaction duration
       let locksValid = true;
       if (booking.lockToken && booking.seatsSelected.length > 0) {
         const verifyScript = `
@@ -47,33 +84,70 @@ const finalizeSuccessfulPayment = async ({ bookingId, razorpayPaymentId }) => {
           end
           return 1
         `;
-        const keys = booking.seatsSelected.map(label => `lock:show_${booking.show}:seat_${label}`);
+        const keys = booking.seatsSelected.map(
+          (label) => `lock:show_${booking.show}:seat_${label}`
+        );
         try {
-          const result = await redis.eval(verifyScript, keys.length, ...keys, booking.lockToken, 60); // brief 60s extension
-          if (result === 0) locksValid = false;
+          const scriptResult = await redis.eval(
+            verifyScript,
+            keys.length,
+            ...keys,
+            booking.lockToken,
+            60 // 60-second extension to survive the transaction
+          );
+          if (scriptResult === 0) locksValid = false;
         } catch (err) {
-          console.error("Lock verification script failed", err);
+          console.warn(`[payment] Lock verification failed for booking ${bookingId}: ${err.message}`);
           locksValid = false;
         }
       }
 
+      // ── Step 3: If lock lost, mark for refund (still atomically) ─────────
       if (!locksValid) {
-        // Payment succeeded after lock ownership was lost (e.g., late webhook)
-        booking.paymentStatus = 'paid';
-        booking.fulfillmentStatus = 'refund_required';
-        booking.razorpayPaymentId = razorpayPaymentId;
-        await booking.save({ session });
-        result = { booking, processedNow: false, refundRequired: true };
+        await Booking.findOneAndUpdate(
+          { _id: bookingId, paymentStatus: 'pending' },
+          {
+            $set: {
+              paymentStatus: 'paid',
+              fulfillmentStatus: 'refund_required',
+              razorpayPaymentId,
+              paidAt: new Date(),
+            },
+          },
+          { session }
+        );
+
+        // Create a refund job atomically with the booking update
+        const refundIdempotencyKey = `quickshow-refund-${bookingId}`;
+        await FulfillmentJob.findOneAndUpdate(
+          { idempotencyKey: `process_refund:${bookingId}` },
+          {
+            $setOnInsert: {
+              idempotencyKey: `process_refund:${bookingId}`,
+              bookingId,
+              type: 'process_refund',
+              status: 'pending',
+              nextRunAt: new Date(),
+              payload: { razorpayPaymentId, refundAmount: booking.totalAmount, refundIdempotencyKey },
+            },
+          },
+          { upsert: true, session }
+        );
+
+        result = {
+          processedNow: false,
+          alreadyProcessed: false,
+          refundRequired: true,
+        };
         return;
       }
-      
-      // 3. Build a conditional Show query requiring all selected seats to still be available
+
+      // ── Step 4: Attempt to book all seats atomically ──────────────────────
       const showFilter = { _id: booking.show };
       booking.seatsSelected.forEach((seatLabel) => {
-        showFilter[`seats.${seatLabel}.status`] = { $ne: 'booked' }; // must not be permanently booked by someone else
+        showFilter[`seats.${seatLabel}.status`] = { $ne: 'booked' };
       });
 
-      // 4. Atomically update all selected seat statuses to booked
       const seatUpdates = {};
       booking.seatsSelected.forEach((seatLabel) => {
         seatUpdates[`seats.${seatLabel}.status`] = 'booked';
@@ -81,156 +155,195 @@ const finalizeSuccessfulPayment = async ({ bookingId, razorpayPaymentId }) => {
 
       const updatedShow = await Show.findOneAndUpdate(
         showFilter,
-        {
-          $set: seatUpdates,
-          $pull: {
-            lockedSeats: { userId: booking.user._id }, // cleanup legacy locks if any
-          },
-        },
+        { $set: seatUpdates },
         { session, new: true }
       );
 
       if (!updatedShow) {
-        throw new Error('One or more seats are no longer available');
+        // Seats were taken by another booking — need refund
+        await Booking.findOneAndUpdate(
+          { _id: bookingId, paymentStatus: 'pending' },
+          {
+            $set: {
+              paymentStatus: 'paid',
+              fulfillmentStatus: 'refund_required',
+              razorpayPaymentId,
+              paidAt: new Date(),
+            },
+          },
+          { session }
+        );
+
+        const refundIdempotencyKey = `quickshow-refund-${bookingId}`;
+        await FulfillmentJob.findOneAndUpdate(
+          { idempotencyKey: `process_refund:${bookingId}` },
+          {
+            $setOnInsert: {
+              idempotencyKey: `process_refund:${bookingId}`,
+              bookingId,
+              type: 'process_refund',
+              status: 'pending',
+              nextRunAt: new Date(),
+              payload: { razorpayPaymentId, refundAmount: booking.totalAmount, refundIdempotencyKey },
+            },
+          },
+          { upsert: true, session }
+        );
+
+        result = {
+          processedNow: false,
+          alreadyProcessed: false,
+          refundRequired: true,
+        };
+        return;
       }
 
-      // 5. Atomically transition the Booking from pending to paid and fulfilled
-      booking.paymentStatus = 'paid';
-      booking.fulfillmentStatus = 'fulfilled';
-      booking.razorpayPaymentId = razorpayPaymentId;
-      await booking.save({ session });
+      // ── Step 5: Mark booking paid and create email fulfillment job ────────
+      await Booking.findOneAndUpdate(
+        { _id: bookingId, paymentStatus: 'pending' },
+        {
+          $set: {
+            paymentStatus: 'paid',
+            razorpayPaymentId,
+            paidAt: new Date(),
+            fulfillmentStatus: 'email_queued',
+            emailStatus: 'queued',
+          },
+        },
+        { session }
+      );
 
-      result = { booking, processedNow: true };
+      // Create durable email job — idempotent via upsert on idempotencyKey
+      await FulfillmentJob.findOneAndUpdate(
+        { idempotencyKey: `send_ticket_email:${bookingId}` },
+        {
+          $setOnInsert: {
+            idempotencyKey: `send_ticket_email:${bookingId}`,
+            bookingId,
+            type: 'send_ticket_email',
+            status: 'pending',
+            nextRunAt: new Date(),
+            payload: {},
+          },
+        },
+        { upsert: true, session }
+      );
+
+      result = {
+        processedNow: true,
+        alreadyProcessed: false,
+        refundRequired: false,
+      };
     });
 
-    if (result && result.processedNow) {
-      await ensureBookingFulfillment(result.booking._id);
-    } else if (result && result.refundRequired) {
-      console.warn(`Payment succeeded but lock lost for booking ${result.booking._id}. Initiating refund...`);
-      
-      try {
-        const razorpay = new Razorpay({
-          key_id: process.env.RAZORPAY_KEY_ID.trim(),
-          key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
+    // ── Step 6: Release Redis locks (OUTSIDE transaction) ────────────────────
+    // This is best-effort — locks will expire automatically anyway
+    if (result && (result.processedNow || result.alreadyProcessed)) {
+      const booking = await Booking.findById(bookingId).select(
+        'show seatsSelected lockToken'
+      );
+      if (booking && booking.lockToken) {
+        await releaseOwnedLocks(
+          booking.show,
+          booking.seatsSelected,
+          booking.lockToken
+        ).catch((err) => {
+          console.warn(
+            `[payment] Failed to release Redis locks for booking ${bookingId}: ${err.message}`
+          );
         });
-        
-        const idempotencyKey = `quickshow-refund-${result.booking._id}`;
-        await Booking.updateOne(
-          { _id: result.booking._id }, 
-          { 
-            refundStatus: 'pending', 
-            refundRequestedAt: new Date(),
-            refundIdempotencyKey: idempotencyKey
-          }
-        );
-        
-        const refund = await razorpay.payments.refund(razorpayPaymentId, {
-          amount: result.booking.totalAmount * 100,
-          speed: 'optimum'
-        }, {
-          headers: {
-            'X-Refund-Idempotency': idempotencyKey
-          }
-        });
-        
-        // Let the webhook handle final processed state, but record the ID
-        await Booking.updateOne(
-          { _id: result.booking._id }, 
-          { refundId: refund.id }
-        );
-        console.log(`✅ Refund requested for booking ${result.booking._id}. Refund ID: ${refund.id}. Waiting for webhook.`);
-      } catch (refundError) {
-        console.error(`❌ Refund failed for booking ${result.booking._id}. Admin intervention required.`, refundError);
-        await Booking.updateOne(
-          { _id: result.booking._id }, 
-          { 
-            refundStatus: 'failed',
-            refundFailureReason: refundError.message || 'Unknown error'
-          }
-        );
       }
     }
 
     return result;
-  } catch (error) {
-    throw error;
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 
-const ensureBookingFulfillment = async (bookingId) => {
-  const booking = await Booking.findById(bookingId).populate('user', 'name email');
-  if (!booking) throw new Error('Booking not found');
-
-  if (booking.paymentStatus === 'paid' && booking.fulfillmentStatus !== 'refund_required') {
-    let updated = false;
-
-    // 1. Mark QR as generated (QR is now generated on-the-fly during email sending)
-    if (!booking.qrGeneratedAt) {
-      booking.qrGeneratedAt = new Date();
-      booking.qrStatus = 'generated';
-      updated = true;
-    }
-
-    // 2. Send Email Atomically
-    if (!booking.confirmationEmailSentAt && booking.user && booking.user.email) {
-      const claimedBooking = await Booking.findOneAndUpdate(
-        { _id: bookingId, emailStatus: { $in: ['pending', 'failed'] } },
-        { $set: { emailStatus: 'sending' } },
-        { new: true }
-      );
-
-      if (claimedBooking) {
-        const ticketToken = generateTicketToken(booking._id, booking.user._id);
-        const idempotencyKey = `booking-confirmation-${booking._id}`;
-        
-        const emailParams = {
-          userName: booking.user.name,
-          movieName: booking.bookingSnapshot?.movieTitle,
-          theatreName: booking.bookingSnapshot?.theatreName,
-          showTime: booking.bookingSnapshot?.showTime ? new Date(booking.bookingSnapshot.showTime).toLocaleString('en-IN', { weekday: 'short', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'N/A',
-          screenName: booking.bookingSnapshot?.screenNumber,
-          seatsList: booking.seatsSelected?.join(', '),
-          amountPaid: booking.totalAmount,
-          bookingId: booking._id,
-          ticketToken,
-          idempotencyKey,
-          userId: booking.user._id
-        };
-        
-        try {
-          await sendTicketEmail(booking.user.email, emailParams);
-          claimedBooking.confirmationEmailSentAt = new Date();
-          claimedBooking.emailStatus = 'sent';
-          await claimedBooking.save();
-          booking.confirmationEmailSentAt = claimedBooking.confirmationEmailSentAt;
-          updated = true;
-        } catch (err) {
-          console.error('Failed to send confirmation email', err);
-          claimedBooking.emailStatus = 'failed';
-          await claimedBooking.save();
-          // Do not throw, allow retry later
-        }
-      }
-    }
-
-    if (booking.qrGeneratedAt && booking.confirmationEmailSentAt) {
-      booking.fulfillmentStatus = 'fulfilled';
-      updated = true;
-    }
-
-    if (updated) {
-      await booking.save();
-    }
-
-    await releaseOwnedLocks(booking.show, booking.seatsSelected, booking.lockToken);
-    return { success: true, message: 'Fulfillment side-effects completed' };
+/**
+ * Manually retry fulfillment for a booking (admin action).
+ * Creates/re-activates email job without duplicating if already present.
+ */
+const retryFulfillment = async (bookingId) => {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) throw new Error(`Booking ${bookingId} not found`);
+  if (booking.paymentStatus !== 'paid') {
+    throw new Error(`Cannot retry fulfillment for booking in state '${booking.paymentStatus}'`);
   }
-  return { success: false, message: 'Booking not eligible for fulfillment side-effects' };
+
+  // Requeue email job
+  const emailIdempotencyKey = `send_ticket_email:${bookingId}`;
+  const existing = await FulfillmentJob.findOne({ idempotencyKey: emailIdempotencyKey });
+
+  if (!existing) {
+    await FulfillmentJob.create({
+      idempotencyKey: emailIdempotencyKey,
+      bookingId,
+      type: 'send_ticket_email',
+      status: 'pending',
+      nextRunAt: new Date(),
+    });
+    return { queued: true, created: true };
+  }
+
+  if (existing.status === 'completed') {
+    return { queued: false, alreadyCompleted: true };
+  }
+
+  // Re-activate failed job
+  await FulfillmentJob.findByIdAndUpdate(existing._id, {
+    $set: {
+      status: 'pending',
+      nextRunAt: new Date(),
+      lastError: null,
+    },
+  });
+  return { queued: true, reactivated: true };
+};
+
+/**
+ * Manually retry a refund (admin action).
+ */
+const retryRefund = async (bookingId) => {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) throw new Error(`Booking ${bookingId} not found`);
+  if (booking.fulfillmentStatus !== 'refund_required') {
+    throw new Error(
+      `Booking ${bookingId} is not in refund_required state (current: ${booking.fulfillmentStatus})`
+    );
+  }
+  if (booking.refundStatus === 'processed') {
+    return { queued: false, alreadyProcessed: true };
+  }
+
+  const refundIdempotencyKey = `process_refund:${bookingId}`;
+  const existing = await FulfillmentJob.findOne({ idempotencyKey: refundIdempotencyKey });
+
+  if (!existing) {
+    await FulfillmentJob.create({
+      idempotencyKey: refundIdempotencyKey,
+      bookingId,
+      type: 'process_refund',
+      status: 'pending',
+      nextRunAt: new Date(),
+      payload: {
+        razorpayPaymentId: booking.razorpayPaymentId,
+        refundAmount: booking.totalAmount,
+        refundIdempotencyKey: `quickshow-refund-${bookingId}`,
+      },
+    });
+    return { queued: true, created: true };
+  }
+
+  await FulfillmentJob.findByIdAndUpdate(existing._id, {
+    $set: { status: 'pending', nextRunAt: new Date(), lastError: null },
+  });
+  return { queued: true, reactivated: true };
 };
 
 module.exports = {
   finalizeSuccessfulPayment,
-  ensureBookingFulfillment,
+  retryFulfillment,
+  retryRefund,
 };

@@ -11,7 +11,7 @@ Quick-Show is a full-stack MERN (MongoDB, Express, React, Node.js) application d
 • Backend (Server): Node.js with Express.js, MongoDB (Mongoose ORM).
 • Authentication: JSON Web Tokens (JWT) & bcryptjs (password hashing).
 • Payment Gateway: Razorpay integration.
-• Features: Node-cron (background jobs), Nodemailer (email notifications), qrcode (ticket generation).
+• Features: Node-cron (background jobs), Resend API (email notifications), qrcode (ticket generation), Zod (env validation).
 
 2. DIRECTORY STRUCTURE & ROOT SCRIPTS
 -------------------------------------------------------------
@@ -47,7 +47,7 @@ The backend acts as a RESTful API.
   - Apply middlewares (e.g., JWT validation to ensure users are logged in, and admin checks for administrative routes).
 
 • Utilities & Middleware (`server/utils/` & `server/middleware/`):
-  - `sendEmail.js`: Uses Nodemailer to send booking confirmation emails.
+  - `sendEmail.js`: Uses the Resend API to send booking confirmation emails with QR code attachments.
   - `cronJobs.js`: Automated jobs that run in the background (e.g., releasing seats if a payment fails/times out, or marking past shows as completed).
   - `errorHandler.js`: Catches exceptions and formats them into clean JSON error responses.
 

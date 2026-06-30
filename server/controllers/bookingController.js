@@ -1,14 +1,59 @@
+'use strict';
+
+/**
+ * Booking Controller
+ * ==================
+ * Handles booking creation, payment verification, webhook processing,
+ * ticket management, and admin operations.
+ *
+ * Security guarantees:
+ *   - Prices are ALWAYS computed server-side from show data
+ *   - Seat availability is ALWAYS validated server-side
+ *   - Lock ownership is validated via Redis Lua script
+ *   - Payment signature is verified with server-side secret
+ *   - Webhook signature is verified against raw request body
+ *   - All state transitions are idempotent
+ *   - No secrets are logged
+ */
+
 const mongoose = require('mongoose');
-const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const Booking = require('../models/Booking');
+const FulfillmentJob = require('../models/FulfillmentJob');
 const Show = require('../models/Show');
 const User = require('../models/User');
 const jwt = require('jsonwebtoken');
-const redis = require('../config/redis');
-const { releaseOwnedLocks } = require('../utils/redisHelpers');
-const { finalizeSuccessfulPayment } = require('../services/paymentService');
+const config = require('../config/env');
+const { verifyLockOwnership, releaseOwnedLocks } = require('../utils/redisHelpers');
+const { finalizeSuccessfulPayment, retryFulfillment, retryRefund } = require('../services/paymentService');
 
+// ─── Razorpay signature verification (shared logic) ───────────────────────────
+
+/**
+ * Verify Razorpay payment signature.
+ * @param {string} orderId
+ * @param {string} paymentId
+ * @param {string} signature
+ * @returns {boolean}
+ */
+const verifyRazorpaySignature = (orderId, paymentId, signature) => {
+  const secret = config.RAZORPAY_KEY_SECRET.trim();
+  const body = `${orderId}|${paymentId}`;
+  const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
+  return expected === signature;
+};
+
+/**
+ * Verify Razorpay webhook signature using raw body.
+ * @param {Buffer} rawBody
+ * @param {string} signature
+ * @returns {boolean}
+ */
+const verifyWebhookSignature = (rawBody, signature) => {
+  const secret = config.RAZORPAY_WEBHOOK_SECRET.trim();
+  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+  return expected === signature;
+};
 
 
 /**
@@ -17,14 +62,13 @@ const { finalizeSuccessfulPayment } = require('../services/paymentService');
  * @access  Private
  */
 const createOrder = async (req, res, next) => {
-  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-    console.error('❌ Razorpay keys missing in environment variables');
+  if (!config.RAZORPAY_KEY_ID || !config.RAZORPAY_KEY_SECRET) {
     return res.status(500).json({ success: false, message: 'Payment gateway configuration error' });
   }
 
   let booking;
   const { showId, seatLabels, lockToken } = req.body;
-  
+
   try {
     const userId = req.user._id;
 
@@ -32,42 +76,47 @@ const createOrder = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Lock token is required' });
     }
 
-    // Idempotency check
-    try {
-      const existingBooking = await Booking.findOne({
-        lockToken,
-        user: userId,
-      });
+    if (!Array.isArray(seatLabels) || seatLabels.length === 0) {
+      return res.status(400).json({ success: false, message: 'Seat labels are required' });
+    }
 
-      if (existingBooking) {
-        if (existingBooking.paymentStatus === 'paid' || existingBooking.paymentStatus === 'SUCCESS') {
-          return res.status(409).json({ success: false, message: 'Booking is already completed' });
-        }
-        if (existingBooking.paymentStatus === 'failed') {
-          return res.status(409).json({ success: false, message: 'Previous booking attempt failed. Please re-select seats.' });
-        }
-        if (existingBooking.paymentStatus === 'pending') {
-          if (existingBooking.razorpayOrderId) {
-            return res.status(200).json({
-              success: true,
-              alreadyCreated: true,
-              bookingId: existingBooking._id,
-              subtotal: existingBooking.subtotal,
-              convenienceFee: existingBooking.convenienceFee,
-              totalAmount: existingBooking.totalAmount,
-              order: {
-                id: existingBooking.razorpayOrderId,
-                amount: existingBooking.totalAmount * 100,
-                currency: 'INR'
-              }
-            });
-          } else {
-            booking = existingBooking;
-          }
-        }
+    if (seatLabels.length > config.MAX_SEATS_PER_BOOKING) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot book more than ${config.MAX_SEATS_PER_BOOKING} seats`,
+      });
+    }
+
+    // Idempotency check — return existing pending order if already created
+    const existingBooking = await Booking.findOne({ lockToken, user: userId });
+    if (existingBooking) {
+      if (existingBooking.paymentStatus === 'paid') {
+        return res.status(409).json({ success: false, message: 'Booking is already completed' });
       }
-    } catch (err) {
-      // ignore or log, proceed to normal flow if not found
+      if (existingBooking.paymentStatus === 'failed') {
+        return res.status(409).json({
+          success: false,
+          message: 'Previous booking attempt failed. Please re-select seats.',
+        });
+      }
+      if (existingBooking.paymentStatus === 'pending' && existingBooking.razorpayOrderId) {
+        return res.status(200).json({
+          success: true,
+          alreadyCreated: true,
+          bookingId: existingBooking._id,
+          subtotal: existingBooking.subtotal,
+          convenienceFee: existingBooking.convenienceFee,
+          totalAmount: existingBooking.totalAmount,
+          order: {
+            id: existingBooking.razorpayOrderId,
+            amount: existingBooking.totalAmount * 100,
+            currency: 'INR',
+          },
+        });
+      }
+      if (existingBooking.paymentStatus === 'pending') {
+        booking = existingBooking;
+      }
     }
 
     const show = await Show.findById(showId).populate('movie').populate('theatre');
@@ -75,39 +124,35 @@ const createOrder = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Show not found' });
     }
 
-    // Atomic Redis validation & renewal
-    const verifyAndExtendScript = `
-      for i, key in ipairs(KEYS) do
-        if redis.call("get", key) ~= ARGV[1] then
-          return 0
-        end
-      end
-      for i, key in ipairs(KEYS) do
-        redis.call("expire", key, tonumber(ARGV[2]))
-      end
-      return 1
-    `;
+    if (!show.isActive || show.showTime <= new Date()) {
+      return res.status(400).json({ success: false, message: 'Show is no longer available' });
+    }
 
-    const keys = seatLabels.map(label => `lock:show_${showId}:seat_${label}`);
-    const scriptResult = await redis.eval(verifyAndExtendScript, keys.length, ...keys, lockToken, 600);
+    // ── Verify lock ownership via atomic Lua script ────────────────────────
+    const locksValid = await verifyLockOwnership(showId, seatLabels, lockToken, 600);
 
-    if (scriptResult === 0) {
+    if (!locksValid) {
       return res.status(409).json({
         success: false,
         message: 'Your seat reservation has expired or is no longer valid.',
       });
     }
 
-    const lockExpiresAt = new Date(Date.now() + 600 * 1000);
-
+    // ── Compute price server-side (NEVER trust frontend prices) ───────────
     let subtotal = 0;
     for (const label of seatLabels) {
       const seat = show.seats.get(label);
+      if (!seat) {
+        return res.status(400).json({
+          success: false,
+          message: `Seat ${label} does not exist in this show`,
+        });
+      }
       const price = show.categoryPricing.get(seat.category);
       if (typeof price !== 'number') {
         return res.status(400).json({
           success: false,
-          message: `Pricing unavailable for seat ${label}`,
+          message: `Pricing unavailable for seat category '${seat.category}'`,
         });
       }
       subtotal += price;
@@ -115,6 +160,8 @@ const createOrder = async (req, res, next) => {
 
     const convenienceFee = Math.round(subtotal * 0.02);
     const totalAmount = subtotal + convenienceFee;
+
+    const lockExpiresAt = new Date(Date.now() + 600 * 1000);
 
     if (!booking) {
       booking = await Booking.create({
@@ -140,96 +187,51 @@ const createOrder = async (req, res, next) => {
     // Atomic update to acquire order creation lock
     const updatedBooking = await Booking.findOneAndUpdate(
       { _id: booking._id, orderCreationStatus: { $in: ['pending', 'failed'] } },
-      { 
-        $set: { 
+      {
+        $set: {
           orderCreationStatus: 'in_progress',
           orderCreationStartedAt: new Date(),
-          orderCreationAttemptId: Date.now().toString()
-        } 
+          orderCreationAttemptId: Date.now().toString(),
+        },
       },
       { new: true }
     );
 
-    const razorpay = new Razorpay({
-      key_id: process.env.RAZORPAY_KEY_ID.trim(),
-      key_secret: process.env.RAZORPAY_KEY_SECRET.trim(),
-    });
-
     if (!updatedBooking) {
-      // Re-fetch to see if it was completed by another request or is stale
-      const existingBooking = await Booking.findById(booking._id);
-      
-      if (existingBooking && existingBooking.razorpayOrderId) {
+      const existingB = await Booking.findById(booking._id);
+      if (existingB && existingB.razorpayOrderId) {
         return res.status(200).json({
           success: true,
-          subtotal: existingBooking.subtotal,
-          convenienceFee: existingBooking.convenienceFee,
-          totalAmount: existingBooking.totalAmount,
-          order: { id: existingBooking.razorpayOrderId, amount: existingBooking.totalAmount * 100, currency: 'INR' },
-          bookingId: existingBooking._id,
+          subtotal: existingB.subtotal,
+          convenienceFee: existingB.convenienceFee,
+          totalAmount: existingB.totalAmount,
+          order: { id: existingB.razorpayOrderId, amount: existingB.totalAmount * 100, currency: 'INR' },
+          bookingId: existingB._id,
         });
       }
-
-      // If it's still in_progress, check if it's stale (e.g. older than 15 seconds)
-      if (existingBooking && existingBooking.orderCreationStatus === 'in_progress') {
-        const startedAt = existingBooking.orderCreationStartedAt ? existingBooking.orderCreationStartedAt.getTime() : 0;
-        const now = Date.now();
-        if (now - startedAt > 15000) {
-          // Stale attempt. Let's reconcile with Razorpay using the receipt (booking._id)
-          try {
-            const orders = await razorpay.orders.all({ receipt: existingBooking._id.toString() });
-            if (orders && orders.items && orders.items.length > 0) {
-              const order = orders.items[0]; // Take the first matched order
-              existingBooking.razorpayOrderId = order.id;
-              existingBooking.orderCreationStatus = 'completed';
-              await existingBooking.save();
-              
-              return res.status(200).json({
-                success: true,
-                subtotal: existingBooking.subtotal,
-                convenienceFee: existingBooking.convenienceFee,
-                totalAmount: existingBooking.totalAmount,
-                order: { id: order.id, amount: order.amount, currency: order.currency },
-                bookingId: existingBooking._id,
-              });
-            } else {
-              // Order doesn't exist in Razorpay, safe to mark failed so it can be retried
-              await Booking.updateOne(
-                { _id: existingBooking._id, orderCreationStatus: 'in_progress' },
-                { $set: { orderCreationStatus: 'failed', orderCreationError: 'Stale attempt recovered, no Razorpay order found' } }
-              );
-              // Tell client to retry
-              return res.status(409).json({
-                success: false,
-                message: 'Previous order creation attempt timed out. Please try again.',
-              });
-            }
-          } catch (reconcileErr) {
-            console.error('Failed to reconcile Razorpay order:', reconcileErr);
-            return res.status(500).json({ success: false, message: 'Failed to verify payment status.' });
-          }
-        }
-      }
-
-      // If still fresh in_progress, return 202
       return res.status(202).json({
         success: true,
         message: 'Order creation is in progress. Please try again shortly.',
       });
     }
-    const options = {
-      amount: totalAmount * 100, // Razorpay uses paise
+
+    const Razorpay = require('razorpay');
+    const razorpay = new Razorpay({
+      key_id: config.RAZORPAY_KEY_ID.trim(),
+      key_secret: config.RAZORPAY_KEY_SECRET.trim(),
+    });
+
+    const order = await razorpay.orders.create({
+      amount: totalAmount * 100,
       currency: 'INR',
       receipt: booking._id.toString(),
-    };
-
-    const order = await razorpay.orders.create(options);
+    });
 
     updatedBooking.razorpayOrderId = order.id;
     updatedBooking.orderCreationStatus = 'completed';
     await updatedBooking.save();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       subtotal,
       convenienceFee,
@@ -238,20 +240,16 @@ const createOrder = async (req, res, next) => {
       bookingId: updatedBooking._id,
     });
   } catch (error) {
-    console.error('DEBUG ERROR:', error);
-    
-    // Only release lock if THIS request failed before saving order
-    // Check if it's a duplicate key error on lockToken, indicating we lost the creation race
     if (error.code === 11000 && error.keyPattern && error.keyPattern.lockToken) {
-      const existingBooking = await Booking.findOne({ lockToken });
-      if (existingBooking && existingBooking.razorpayOrderId) {
+      const existing = await Booking.findOne({ lockToken });
+      if (existing && existing.razorpayOrderId) {
         return res.status(200).json({
           success: true,
-          subtotal: existingBooking.subtotal,
-          convenienceFee: existingBooking.convenienceFee,
-          totalAmount: existingBooking.totalAmount,
-          order: { id: existingBooking.razorpayOrderId, amount: existingBooking.totalAmount * 100, currency: 'INR' },
-          bookingId: existingBooking._id,
+          subtotal: existing.subtotal,
+          convenienceFee: existing.convenienceFee,
+          totalAmount: existing.totalAmount,
+          order: { id: existing.razorpayOrderId, amount: existing.totalAmount * 100, currency: 'INR' },
+          bookingId: existing._id,
         });
       }
       return res.status(202).json({
@@ -262,31 +260,23 @@ const createOrder = async (req, res, next) => {
 
     if (booking && booking._id) {
       await Booking.updateOne(
-        { _id: booking._id }, 
-        { 
-          paymentStatus: 'failed', 
-          orderCreationStatus: 'failed',
-          orderCreationError: error.message || 'Unknown error during Razorpay order creation'
-        }
-      );
-    }
-    
-    // Release locks only if we are absolutely sure the booking failed completely
-    // For safety, we only release if we successfully created it (not 11000)
-    if (error.code !== 11000) {
-      await releaseOwnedLocks(showId, seatLabels, lockToken);
+        { _id: booking._id },
+        { paymentStatus: 'failed', orderCreationStatus: 'failed', orderCreationError: 'Order creation failed' }
+      ).catch(() => {});
+      await releaseOwnedLocks(showId, seatLabels, lockToken).catch(() => {});
     }
 
+    // Mask Razorpay auth errors
     if (error.statusCode === 401) {
       error.statusCode = 500;
-      error.message = 'Payment Gateway Configuration Error: Invalid API Keys';
+      error.message = 'Payment gateway configuration error';
     }
     next(error);
   }
 };
 
 /**
- * @desc    Verify Razorpay Payment
+ * @desc    Verify Razorpay Payment (frontend callback)
  * @route   POST /api/bookings/verify-payment
  * @access  Private
  */
@@ -294,45 +284,59 @@ const verifyPayment = async (req, res, next) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
 
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !bookingId) {
+      return res.status(400).json({ success: false, message: 'Missing required payment parameters' });
+    }
+
     const booking = await Booking.findById(bookingId);
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
 
+    // Authorization: user can only verify their own booking
     if (booking.user.toString() !== req.user._id.toString()) {
       return res.status(403).json({ success: false, message: 'You cannot verify this booking' });
     }
 
+    // Validate order ID matches booking
     if (booking.razorpayOrderId !== razorpay_order_id) {
       return res.status(400).json({ success: false, message: 'Order ID does not match this booking' });
     }
 
-    if (booking.paymentStatus === 'paid' || booking.paymentStatus === 'SUCCESS') {
+    // Idempotency — already paid
+    if (booking.paymentStatus === 'paid') {
       if (booking.razorpayPaymentId && booking.razorpayPaymentId !== razorpay_payment_id) {
-        return res.status(409).json({ success: false, message: 'Booking was already processed using another payment' });
+        return res.status(409).json({
+          success: false,
+          message: 'Booking was already processed using a different payment',
+        });
       }
-      return res.status(200).json({ success: true, alreadyProcessed: true, message: 'Payment was already verified' });
+      return res.status(200).json({
+        success: true,
+        alreadyProcessed: true,
+        message: 'Payment was already verified',
+      });
     }
 
-    const secret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
-    const body = String(booking.razorpayOrderId) + '|' + String(razorpay_payment_id);
-    
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(body)
-      .digest('hex');
-
-    if (expectedSignature !== razorpay_signature) {
+    // Verify signature — uses server-side secret only
+    if (!verifyRazorpaySignature(razorpay_order_id, razorpay_payment_id, razorpay_signature)) {
       return res.status(400).json({ success: false, message: 'Invalid payment signature' });
     }
 
-    const result = await finalizeSuccessfulPayment({ bookingId, razorpayPaymentId: razorpay_payment_id });
+    const result = await finalizeSuccessfulPayment({
+      bookingId,
+      razorpayPaymentId: razorpay_payment_id,
+    });
 
-    if (!result || (result.processedNow === false && !result.alreadyProcessed)) {
+    if (!result) {
       return res.status(400).json({ success: false, message: 'Payment finalization failed' });
     }
 
-    res.status(200).json({ success: true, message: 'Payment verified successfully' });
+    return res.status(200).json({
+      success: true,
+      message: 'Payment verified successfully',
+      refundRequired: result.refundRequired || false,
+    });
   } catch (error) {
     next(error);
   }
@@ -362,7 +366,7 @@ const getMyBookings = async (req, res, next) => {
 };
 
 /**
- * @desc    Get a single booking by ID (for booking success page)
+ * @desc    Get a single booking by ID
  * @route   GET /api/bookings/:id
  * @access  Private
  */
@@ -370,7 +374,7 @@ const getBookingById = async (req, res, next) => {
   try {
     const booking = await Booking.findOne({
       _id: req.params.id,
-      user: req.user._id, // Security: users can only see their own bookings
+      user: req.user._id,
     }).populate({
       path: 'show',
       populate: [
@@ -414,7 +418,72 @@ const getAllBookingsAdmin = async (req, res, next) => {
 };
 
 /**
- * @desc    Get ticket details before verification
+ * @desc    Get admin dashboard — problematic bookings
+ * @route   GET /api/bookings/admin/issues
+ * @access  Private/Admin
+ */
+const getAdminIssues = async (req, res, next) => {
+  try {
+    const [failedEmails, pendingRefunds, failedJobs] = await Promise.all([
+      Booking.find({ paymentStatus: 'paid', emailStatus: { $in: ['failed', 'pending'] } })
+        .select('_id bookingSnapshot seatsSelected totalAmount emailStatus createdAt user')
+        .populate('user', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(50),
+
+      Booking.find({ fulfillmentStatus: 'refund_required', refundStatus: { $ne: 'processed' } })
+        .select('_id bookingSnapshot totalAmount refundStatus refundFailureReason createdAt user razorpayPaymentId')
+        .populate('user', 'name email')
+        .sort({ createdAt: -1 })
+        .limit(50),
+
+      FulfillmentJob.find({ status: 'failed' })
+        .select('_id type bookingId lastError attemptCount updatedAt')
+        .sort({ updatedAt: -1 })
+        .limit(50),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      failedEmails,
+      pendingRefunds,
+      failedJobs,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Admin: retry ticket email for a booking
+ * @route   POST /api/bookings/admin/:id/retry-email
+ * @access  Private/Admin
+ */
+const adminRetryEmail = async (req, res, next) => {
+  try {
+    const result = await retryFulfillment(req.params.id);
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Admin: retry refund for a booking
+ * @route   POST /api/bookings/admin/:id/retry-refund
+ * @access  Private/Admin
+ */
+const adminRetryRefund = async (req, res, next) => {
+  try {
+    const result = await retryRefund(req.params.id);
+    res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc    Get ticket details before verification (preview)
  * @route   GET /api/bookings/ticket-details?token=...
  * @access  Private/Admin
  */
@@ -427,42 +496,56 @@ const getTicketDetails = async (req, res, next) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.TICKET_JWT_SECRET, {
+      decoded = jwt.verify(token, config.TICKET_JWT_SECRET, {
         issuer: 'quickshow',
-        audience: 'theatre-admin'
+        audience: 'theatre-admin',
       });
     } catch (err) {
       return res.status(401).json({ success: false, message: 'Invalid or expired ticket token' });
     }
 
     if (decoded.type !== 'movie-ticket') {
-       return res.status(401).json({ success: false, message: 'Invalid token type' });
+      return res.status(401).json({ success: false, message: 'Invalid token type' });
     }
 
     const booking = await Booking.findOne({
       _id: decoded.bookingId,
       user: decoded.userId,
-      paymentStatus: 'paid'
-    }).populate('user', 'name email').populate({
-      path: 'show',
-      populate: [
-        { path: 'movie', select: 'title' },
-        { path: 'theatre', select: 'name' }
-      ]
-    });
+      paymentStatus: 'paid',
+    })
+      .populate('user', 'name email')
+      .populate({
+        path: 'show',
+        populate: [
+          { path: 'movie', select: 'title' },
+          { path: 'theatre', select: 'name' },
+        ],
+      });
 
     if (!booking) {
-      return res.status(404).json({ success: false, message: 'Ticket not found or unpaid' });
+      return res.status(404).json({ success: false, message: 'Ticket not found or not paid' });
     }
 
-    res.status(200).json({ success: true, booking });
+    // Don't expose full user profile or sensitive fields
+    const safeBooking = {
+      _id: booking._id,
+      seatsSelected: booking.seatsSelected,
+      totalAmount: booking.totalAmount,
+      isScanned: booking.isScanned,
+      scannedAt: booking.scannedAt,
+      bookingSnapshot: booking.bookingSnapshot,
+      show: booking.show,
+      user: { name: booking.user.name },
+    };
+
+    res.status(200).json({ success: true, booking: safeBooking });
   } catch (error) {
     next(error);
   }
 };
 
 /**
- * @desc    Verify and mark a ticket as scanned
+ * @desc    Verify and mark a ticket as scanned (atomic, replay-safe)
  * @route   PUT /api/bookings/verify-ticket
  * @access  Private/Admin
  */
@@ -475,23 +558,22 @@ const verifyTicket = async (req, res, next) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.TICKET_JWT_SECRET, {
+      decoded = jwt.verify(token, config.TICKET_JWT_SECRET, {
         issuer: 'quickshow',
-        audience: 'theatre-admin'
+        audience: 'theatre-admin',
       });
     } catch (err) {
       return res.status(401).json({ success: false, message: 'Invalid or expired ticket token' });
     }
 
     if (decoded.type !== 'movie-ticket') {
-       return res.status(401).json({ success: false, message: 'Invalid token type' });
+      return res.status(401).json({ success: false, message: 'Invalid token type' });
     }
 
-    const bookingId = decoded.bookingId;
-
+    // Atomic find-and-update: only succeeds if booking is paid AND not yet scanned
     const booking = await Booking.findOneAndUpdate(
       {
-        _id: bookingId,
+        _id: decoded.bookingId,
         user: decoded.userId,
         paymentStatus: 'paid',
         isScanned: false,
@@ -504,26 +586,37 @@ const verifyTicket = async (req, res, next) => {
         },
       },
       { new: true }
-    ).populate('user', 'name email').populate({
-      path: 'show',
-      populate: [
-        { path: 'movie', select: 'title' },
-        { path: 'theatre', select: 'name' },
-      ],
-    });
+    )
+      .populate('user', 'name email')
+      .populate({
+        path: 'show',
+        populate: [
+          { path: 'movie', select: 'title' },
+          { path: 'theatre', select: 'name' },
+        ],
+      });
 
     if (!booking) {
-      const checkBooking = await Booking.findById(bookingId);
-      if (checkBooking && checkBooking.isScanned) {
-         return res.status(409).json({ success: false, message: 'Ticket has already been scanned' });
+      // Check if already scanned
+      const check = await Booking.findById(decoded.bookingId);
+      if (check && check.isScanned) {
+        return res.status(409).json({ success: false, message: 'Ticket has already been scanned' });
       }
-      return res.status(400).json({ success: false, message: 'Ticket not found or unpaid' });
+      return res.status(400).json({ success: false, message: 'Ticket not found or not paid' });
     }
 
     res.status(200).json({
       success: true,
       message: 'Ticket successfully verified.',
-      booking,
+      booking: {
+        _id: booking._id,
+        seatsSelected: booking.seatsSelected,
+        bookingSnapshot: booking.bookingSnapshot,
+        isScanned: booking.isScanned,
+        scannedAt: booking.scannedAt,
+        user: { name: booking.user.name },
+        show: booking.show,
+      },
     });
   } catch (error) {
     next(error);
@@ -531,75 +624,96 @@ const verifyTicket = async (req, res, next) => {
 };
 
 /**
- * @desc    Razorpay Webhook for Payment Resilience
+ * @desc    Razorpay Webhook
  * @route   POST /api/webhook/razorpay
- * @access  Public
+ * @access  Public (verified by signature)
  */
-const razorpayWebhook = async (req, res, next) => {
+const razorpayWebhook = async (req, res) => {
   try {
     const signature = req.headers['x-razorpay-signature'];
-    const secret = (process.env.RAZORPAY_WEBHOOK_SECRET || '').trim();
+    const webhookSecret = config.RAZORPAY_WEBHOOK_SECRET;
 
-    if (!secret || !signature) {
-      return res.status(400).send('Missing signature or secret');
+    if (!webhookSecret || !signature) {
+      return res.status(400).send('Missing signature or webhook secret');
     }
 
-    // Verify signature using raw body
-    const expectedSignature = crypto
-      .createHmac('sha256', secret)
-      .update(req.body)
-      .digest('hex');
-
-    if (expectedSignature !== signature) {
-      console.error('Invalid Razorpay Webhook Signature');
+    if (!verifyWebhookSignature(req.body, signature)) {
+      console.warn('[webhook] Invalid Razorpay webhook signature received');
       return res.status(400).send('Invalid signature');
     }
 
     const payload = JSON.parse(req.body.toString());
+    const eventType = payload.event;
+    const eventId = payload.event_id; // Razorpay webhook event ID for dedup
 
-    if (payload.event === 'payment.captured') {
+    console.log(`[webhook] Received event: ${eventType} | eventId: ${eventId || 'unknown'}`);
+
+    if (eventType === 'payment.captured') {
       const paymentEntity = payload.payload.payment.entity;
-      const order_id = paymentEntity.order_id;
+      const orderId = paymentEntity.order_id;
+      const paymentId = paymentEntity.id;
 
-      const booking = await Booking.findOne({ razorpayOrderId: order_id });
+      const booking = await Booking.findOne({ razorpayOrderId: orderId });
 
       if (!booking) {
-        return res.status(404).send('Booking not found');
+        console.warn(`[webhook] No booking found for order ${orderId}`);
+        return res.status(200).send('OK'); // Return 200 so Razorpay doesn't retry
       }
 
-      await finalizeSuccessfulPayment({ bookingId: booking._id, razorpayPaymentId: paymentEntity.id });
-    } else if (payload.event.startsWith('refund.')) {
-      const refundEntity = payload.payload.refund.entity;
-      const paymentId = refundEntity.payment_id;
-      
-      const booking = await Booking.findOne({ razorpayPaymentId: paymentId });
-      
-      if (booking) {
-        if (payload.event === 'refund.created') {
-          await Booking.updateOne({ _id: booking._id }, { 
-            refundStatus: 'pending', 
-            refundId: refundEntity.id 
-          });
-        } else if (payload.event === 'refund.processed') {
-          await Booking.updateOne({ _id: booking._id }, { 
-            refundStatus: 'processed', 
-            refundId: refundEntity.id,
-            refundProcessedAt: new Date()
-          });
-        } else if (payload.event === 'refund.failed') {
-          await Booking.updateOne({ _id: booking._id }, { 
-            refundStatus: 'failed', 
-            refundId: refundEntity.id,
-            refundFailureReason: refundEntity.status || 'Webhook failure'
-          });
-        }
+      // Idempotent: already processed
+      if (booking.paymentStatus === 'paid') {
+        console.log(`[webhook] Booking ${booking._id} already paid, ignoring duplicate event`);
+        return res.status(200).send('OK');
       }
+
+      await finalizeSuccessfulPayment({
+        bookingId: booking._id,
+        razorpayPaymentId: paymentId,
+      });
+
+      console.log(`[webhook] ✅ Payment finalized for booking ${booking._id}`);
+    } else if (eventType === 'refund.created') {
+      const refundEntity = payload.payload.refund.entity;
+      await Booking.updateOne(
+        { razorpayPaymentId: refundEntity.payment_id },
+        { $set: { refundStatus: 'pending', refundId: refundEntity.id } }
+      );
+    } else if (eventType === 'refund.processed') {
+      const refundEntity = payload.payload.refund.entity;
+      await Booking.updateOne(
+        { razorpayPaymentId: refundEntity.payment_id },
+        {
+          $set: {
+            refundStatus: 'processed',
+            refundId: refundEntity.id,
+            refundProcessedAt: new Date(),
+            paymentStatus: 'refunded',
+          },
+        }
+      );
+      console.log(`[webhook] ✅ Refund processed for payment ${refundEntity.payment_id}`);
+    } else if (eventType === 'refund.failed') {
+      const refundEntity = payload.payload.refund.entity;
+      await Booking.updateOne(
+        { razorpayPaymentId: refundEntity.payment_id },
+        {
+          $set: {
+            refundStatus: 'failed',
+            refundId: refundEntity.id,
+            refundFailureReason: 'Razorpay reported refund failure',
+            paymentStatus: 'refund_failed',
+          },
+        }
+      );
+      console.warn(`[webhook] ❌ Refund failed for payment ${refundEntity.payment_id}`);
     }
 
-    res.status(200).send('OK');
+    return res.status(200).send('OK');
   } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).send('Webhook Error');
+    // Always return 200 to prevent Razorpay from retrying indefinitely
+    // for errors that are our fault (e.g. DB error). Log the error for investigation.
+    console.error('[webhook] Error processing webhook:', error.message);
+    return res.status(200).send('OK');
   }
 };
 
@@ -609,6 +723,9 @@ module.exports = {
   getMyBookings,
   getBookingById,
   getAllBookingsAdmin,
+  getAdminIssues,
+  adminRetryEmail,
+  adminRetryRefund,
   verifyTicket,
   getTicketDetails,
   razorpayWebhook,

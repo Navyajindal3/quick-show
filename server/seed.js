@@ -1,20 +1,62 @@
 /**
- * Seed Script — Run once to bootstrap the database.
- * Creates: Admin user, 4 sample movies, 1 theatre, 5 shows.
+ * Secure Seed Script
+ * ==================
+ * Seeds the database with an administrator account and sample data.
  *
- * Usage (from /server directory): node seed.js
+ * REQUIRED environment variables:
+ *   SEED_ADMIN_EMAIL    — valid email address for the administrator account
+ *   SEED_ADMIN_PASSWORD — password with min 12 chars, upper/lower/digit/symbol
+ *
+ * Usage (from /server directory):
+ *   SEED_ADMIN_EMAIL=admin@example.com SEED_ADMIN_PASSWORD='Str0ng!Pass' node seed.js
+ *
+ * Or set variables in your .env file and run:
+ *   node seed.js
+ *
+ * Safe to run multiple times — will update an existing admin rather than duplicate.
+ * Exits with non-zero status on any failure.
  */
 
+'use strict';
+
 const mongoose = require('mongoose');
-const crypto = require('crypto');
 const dotenv = require('dotenv');
 
-dotenv.config(); // Loads .env from current directory (server/)
+dotenv.config(); // Load .env from current directory (server/)
 
-const { SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD } = process.env;
+// ─── Validate required seed credentials ────────────────────────────────────
+const { SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD, MONGO_URI } = process.env;
 
-if (!SEED_ADMIN_EMAIL || !SEED_ADMIN_PASSWORD) {
-  console.error('❌ SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD must be provided in the environment or .env file to run the seed script safely.');
+const errors = [];
+
+if (!MONGO_URI) {
+  errors.push('MONGO_URI is required');
+}
+
+if (!SEED_ADMIN_EMAIL) {
+  errors.push('SEED_ADMIN_EMAIL is required');
+} else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(SEED_ADMIN_EMAIL)) {
+  errors.push('SEED_ADMIN_EMAIL must be a valid email address');
+}
+
+if (!SEED_ADMIN_PASSWORD) {
+  errors.push('SEED_ADMIN_PASSWORD is required');
+} else {
+  const pwd = SEED_ADMIN_PASSWORD;
+  const pwdErrors = [];
+  if (pwd.length < 12) pwdErrors.push('at least 12 characters');
+  if (!/[A-Z]/.test(pwd)) pwdErrors.push('at least one uppercase letter');
+  if (!/[a-z]/.test(pwd)) pwdErrors.push('at least one lowercase letter');
+  if (!/\d/.test(pwd)) pwdErrors.push('at least one digit');
+  if (!/[^A-Za-z0-9]/.test(pwd)) pwdErrors.push('at least one special character');
+  if (pwdErrors.length > 0) {
+    errors.push(`SEED_ADMIN_PASSWORD must contain: ${pwdErrors.join(', ')}`);
+  }
+}
+
+if (errors.length > 0) {
+  console.error('❌ Seed script validation failed:');
+  errors.forEach((e) => console.error(`   • ${e}`));
   process.exit(1);
 }
 
@@ -36,40 +78,48 @@ const generateSeatMap = (tierConfig) => {
 };
 
 const seed = async () => {
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(MONGO_URI);
   console.log('✅ Connected to MongoDB');
 
-  // ─── Admin User ────────────────────────────────────────────────────────
-  const existingAdmin = await User.findOne({ email: SEED_ADMIN_EMAIL });
-  
+  // ─── Admin User (upsert — never duplicate, never print password) ──────────
+  const existingAdmin = await User.findOne({ email: SEED_ADMIN_EMAIL.toLowerCase() });
+
   if (!existingAdmin) {
     await User.create({
-      name: 'Admin User',
-      email: SEED_ADMIN_EMAIL,
+      name: 'Administrator',
+      email: SEED_ADMIN_EMAIL.toLowerCase(),
       password: SEED_ADMIN_PASSWORD,
       role: 'admin',
     });
     console.log(`👤 Admin user created: ${SEED_ADMIN_EMAIL}`);
+  } else if (existingAdmin.role !== 'admin') {
+    // Promote to admin if account exists with different role (explicit operator intent)
+    existingAdmin.role = 'admin';
+    existingAdmin.password = SEED_ADMIN_PASSWORD;
+    await existingAdmin.save();
+    console.log(`👤 Existing account promoted to admin: ${SEED_ADMIN_EMAIL}`);
   } else {
-    console.log('👤 Admin already exists, skipping...');
+    console.log(`👤 Admin already exists, skipping creation: ${SEED_ADMIN_EMAIL}`);
   }
 
-  // ─── Clear existing movies/theatres/shows ─────────────────────────────
+  // ─── Clear and reseed sample data ─────────────────────────────────────────
   await Movie.deleteMany({});
   await Theatre.deleteMany({});
   await Show.deleteMany({});
   console.log('🗑️  Cleared existing movies, theatres, shows');
 
-  // ─── Movies ────────────────────────────────────────────────────────────
+  // ─── Movies ────────────────────────────────────────────────────────────────
   const movies = await Movie.insertMany([
     {
       title: 'Kalki 2898-AD',
-      description: 'A sci-fi mythological action epic set in the futuristic city of Kasi. When an ancient warrior is reborn, the fate of humanity changes forever in this visually stunning spectacle.',
+      description:
+        'A sci-fi mythological action epic set in the futuristic city of Kasi. When an ancient warrior is reborn, the fate of humanity changes forever.',
       genre: ['Action', 'Sci-Fi', 'Mythology'],
       language: 'Hindi',
       duration: 180,
       releaseDate: new Date('2024-06-27'),
-      posterUrl: 'https://m.media-amazon.com/images/M/MV5BNGUzNDY4ZmItMzYyOC00ODA5LWI3NTEtMmQ4YjJlODRmY2UxXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
+      posterUrl:
+        'https://m.media-amazon.com/images/M/MV5BNGUzNDY4ZmItMzYyOC00ODA5LWI3NTEtMmQ4YjJlODRmY2UxXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
       rating: 7.4,
       director: 'Nag Ashwin',
       cast: ['Prabhas', 'Deepika Padukone', 'Amitabh Bachchan', 'Kamal Haasan'],
@@ -77,12 +127,14 @@ const seed = async () => {
     },
     {
       title: 'Animal',
-      description: 'A son goes to extreme lengths to protect his family empire after an attempt on his father\'s life. A raw, visceral tale of love, power, and revenge.',
+      description:
+        "A son goes to extreme lengths to protect his family empire after an attempt on his father's life.",
       genre: ['Action', 'Drama', 'Thriller'],
       language: 'Hindi',
       duration: 202,
       releaseDate: new Date('2023-12-01'),
-      posterUrl: 'https://m.media-amazon.com/images/M/MV5BMjI4ZDI5ZmQtZGNjYi00Y2E4LWJhZGQtMDc2MzA3YzBmYTkwXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_FMjpg_UX1000_.jpg',
+      posterUrl:
+        'https://m.media-amazon.com/images/M/MV5BMjI4ZDI5ZmQtZGNjYi00Y2E4LWJhZGQtMDc2MzA3YzBmYTkwXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_FMjpg_UX1000_.jpg',
       rating: 6.5,
       director: 'Sandeep Reddy Vanga',
       cast: ['Ranbir Kapoor', 'Rashmika Mandanna', 'Anil Kapoor', 'Bobby Deol'],
@@ -90,12 +142,14 @@ const seed = async () => {
     },
     {
       title: 'Pushpa 2: The Rule',
-      description: 'Pushpa Raj returns stronger than ever, ruling the red sandalwood smuggling trade while facing powerful enemies who want him destroyed.',
+      description:
+        'Pushpa Raj returns stronger than ever, ruling the red sandalwood smuggling trade while facing powerful enemies.',
       genre: ['Action', 'Drama', 'Crime'],
       language: 'Hindi',
       duration: 190,
       releaseDate: new Date('2024-12-05'),
-      posterUrl: 'https://m.media-amazon.com/images/M/MV5BNTNiNzY0NjctNTQ4ZS00ZGZiLTk2ODktMjQ3YWFiN2Q2MjkzXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
+      posterUrl:
+        'https://m.media-amazon.com/images/M/MV5BNTNiNzY0NjctNTQ4ZS00ZGZiLTk2ODktMjQ3YWFiN2Q2MjkzXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
       rating: 7.9,
       director: 'Sukumar',
       cast: ['Allu Arjun', 'Rashmika Mandanna', 'Fahadh Faasil'],
@@ -103,25 +157,26 @@ const seed = async () => {
     },
     {
       title: 'Stree 2',
-      description: 'The residents of Chanderi face a terrifying new supernatural threat. The legend of Stree evolves in this hilarious horror-comedy sequel.',
+      description: 'The residents of Chanderi face a terrifying new supernatural threat.',
       genre: ['Horror', 'Comedy'],
       language: 'Hindi',
       duration: 135,
       releaseDate: new Date('2024-08-15'),
-      posterUrl: 'https://m.media-amazon.com/images/M/MV5BMjFmNTA0OTYtMjExOC00ZjMzLTliNGQtZDk5ZmI1NzgwZmJkXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
+      posterUrl:
+        'https://m.media-amazon.com/images/M/MV5BMjFmNTA0OTYtMjExOC00ZjMzLTliNGQtZDk5ZmI1NzgwZmJkXkEyXkFqcGdeQXVyMTUzNTgzNzM0._V1_.jpg',
       rating: 8.1,
       director: 'Amar Kaushik',
-      cast: ['Rajkummar Rao', 'Shraddha Kapoor', 'Aparshakti Khurana', 'Tamannaah Bhatia'],
+      cast: ['Rajkummar Rao', 'Shraddha Kapoor', 'Aparshakti Khurana'],
       isActive: true,
     },
   ]);
   console.log(`🎬 ${movies.length} movies created`);
 
-  // ─── Theatres ──────────────────────────────────────────────────────────
+  // ─── Theatres ──────────────────────────────────────────────────────────────
   const standardTierConfig = [
     { categoryName: 'Recliner', rows: ['A'], seatsPerRow: 10 },
     { categoryName: 'Premium', rows: ['B', 'C'], seatsPerRow: 10 },
-    { categoryName: 'Standard', rows: ['D', 'E', 'F'], seatsPerRow: 10 }
+    { categoryName: 'Standard', rows: ['D', 'E', 'F'], seatsPerRow: 10 },
   ];
 
   const theatre1 = await Theatre.create({
@@ -136,7 +191,11 @@ const seed = async () => {
 
   const theatre2 = await Theatre.create({
     name: 'INOX Megaplex Andheri',
-    location: { address: 'Infiniti Mall, Link Road, Andheri West', city: 'Mumbai', state: 'Maharashtra' },
+    location: {
+      address: 'Infiniti Mall, Link Road, Andheri West',
+      city: 'Mumbai',
+      state: 'Maharashtra',
+    },
     screens: [
       { screenNumber: 1, totalSeats: 60, tierConfig: standardTierConfig },
       { screenNumber: 2, totalSeats: 60, tierConfig: standardTierConfig },
@@ -145,19 +204,48 @@ const seed = async () => {
   });
   console.log('🏛️  2 theatres created');
 
-  // ─── Shows (for next 3 days) ───────────────────────────────────────────
+  // ─── Shows (for next 3 days) ───────────────────────────────────────────────
   const showsToCreate = [];
   for (let dayOffset = 0; dayOffset < 3; dayOffset++) {
     const showDate = new Date();
     showDate.setDate(showDate.getDate() + dayOffset + 1);
 
     showsToCreate.push(
-      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(showDate.setHours(10, 0, 0, 0)), categoryPricing: { Recliner: 500, Premium: 300, Standard: 200 } },
-      { movie: movies[0]._id, theatre: theatre1._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(14, 30, 0, 0)), categoryPricing: { Recliner: 550, Premium: 350, Standard: 250 } },
-      { movie: movies[1]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(11, 0, 0, 0)), categoryPricing: { Recliner: 400, Premium: 250, Standard: 150 } },
-      { movie: movies[2]._id, theatre: theatre2._id, screenNumber: 1, showTime: new Date(new Date(showDate).setHours(13, 0, 0, 0)), categoryPricing: { Recliner: 600, Premium: 400, Standard: 300 } },
-      { movie: movies[3]._id, theatre: theatre2._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(20, 30, 0, 0)), categoryPricing: { Recliner: 450, Premium: 300, Standard: 200 } },
-      { movie: movies[3]._id, theatre: theatre1._id, screenNumber: 2, showTime: new Date(new Date(showDate).setHours(18, 0, 0, 0)), categoryPricing: { Recliner: 500, Premium: 320, Standard: 220 } },
+      {
+        movie: movies[0]._id,
+        theatre: theatre1._id,
+        screenNumber: 1,
+        showTime: new Date(new Date(showDate).setHours(10, 0, 0, 0)),
+        categoryPricing: { Recliner: 500, Premium: 300, Standard: 200 },
+      },
+      {
+        movie: movies[0]._id,
+        theatre: theatre1._id,
+        screenNumber: 1,
+        showTime: new Date(new Date(showDate).setHours(14, 30, 0, 0)),
+        categoryPricing: { Recliner: 550, Premium: 350, Standard: 250 },
+      },
+      {
+        movie: movies[1]._id,
+        theatre: theatre1._id,
+        screenNumber: 2,
+        showTime: new Date(new Date(showDate).setHours(11, 0, 0, 0)),
+        categoryPricing: { Recliner: 400, Premium: 250, Standard: 150 },
+      },
+      {
+        movie: movies[2]._id,
+        theatre: theatre2._id,
+        screenNumber: 1,
+        showTime: new Date(new Date(showDate).setHours(13, 0, 0, 0)),
+        categoryPricing: { Recliner: 600, Premium: 400, Standard: 300 },
+      },
+      {
+        movie: movies[3]._id,
+        theatre: theatre2._id,
+        screenNumber: 2,
+        showTime: new Date(new Date(showDate).setHours(20, 30, 0, 0)),
+        categoryPricing: { Recliner: 450, Premium: 300, Standard: 200 },
+      }
     );
   }
 
@@ -168,16 +256,17 @@ const seed = async () => {
 
   console.log('\n✨ Seeding complete!');
   console.log('─────────────────────────────────────────');
-  console.log(`🔐 Admin Login: ${SEED_ADMIN_EMAIL}`);
-  console.log('🌐 Frontend:   http://localhost:5173');
-  console.log('🚀 Backend:    http://localhost:5000');
+  console.log(`🔐 Admin login: ${SEED_ADMIN_EMAIL}`);
+  console.log('🌐 Frontend:    http://localhost:5173');
+  console.log('🚀 Backend:     http://localhost:5000');
   console.log('─────────────────────────────────────────\n');
-
-  await mongoose.disconnect();
-  process.exit(0);
 };
 
-seed().catch((err) => {
-  console.error('❌ Seed failed:', err.message);
-  process.exit(1);
-});
+seed()
+  .catch((err) => {
+    console.error('❌ Seed failed:', err.message);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await mongoose.disconnect().catch(() => {});
+  });

@@ -1,18 +1,29 @@
+'use strict';
+
 const Show = require('../models/Show');
 const Theatre = require('../models/Theatre');
-const redis = require('../config/redis');
+const config = require('../config/env');
+const {
+  acquireSeatLocks,
+  releaseOwnedLocks,
+  getLockedSeatsForShow,
+} = require('../utils/redisHelpers');
 const crypto = require('crypto');
-const { releaseOwnedLocks } = require('../utils/redisHelpers');
+
+// ─── Seat label validation ─────────────────────────────────────────────────────
+const SEAT_LABEL_PATTERN = /^[A-Z][1-9]\d*$/;
+
+const validateSeatLabel = (label) => {
+  return typeof label === 'string' && SEAT_LABEL_PATTERN.test(label) && label.length <= 4;
+};
 
 /**
  * Helper: Generate seat map for a show.
- * Generates seat categories dynamically based on Theatre screen tierConfig.
  */
 const generateSeatMap = (tierConfig) => {
   const seatMap = {};
 
   if (!tierConfig || tierConfig.length === 0) {
-    // Fallback: simple 60-seat Standard layout
     const rowLabels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').slice(0, 6);
     for (const row of rowLabels) {
       for (let col = 1; col <= 10; col++) {
@@ -34,7 +45,7 @@ const generateSeatMap = (tierConfig) => {
 };
 
 /**
- * @desc    Get shows for a specific movie (with populated theatre info)
+ * @desc    Get shows for a specific movie
  * @route   GET /api/shows/movie/:movieId
  * @access  Public
  */
@@ -44,7 +55,7 @@ const getShowsByMovie = async (req, res, next) => {
     const filter = {
       movie: req.params.movieId,
       isActive: true,
-      showTime: { $gte: new Date() }, // Only future shows
+      showTime: { $gte: new Date() },
     };
 
     if (date) {
@@ -67,27 +78,23 @@ const getShowsByMovie = async (req, res, next) => {
 };
 
 /**
- * @desc    Get a single show with full seat map
+ * @desc    Get a single show with full seat map (locked seats overlaid from Redis)
  * @route   GET /api/shows/:id
  * @access  Public
  */
 const getShowById = async (req, res, next) => {
   try {
-    const show = await Show.findById(req.params.id)
-      .populate('movie')
-      .populate('theatre');
+    const show = await Show.findById(req.params.id).populate('movie').populate('theatre');
 
     if (!show) {
       return res.status(404).json({ success: false, message: 'Show not found' });
     }
 
-    // Query Redis for temporarily locked seats
-    const lockPattern = `lock:show_${show._id}:seat_*`;
-    const keys = await redis.keys(lockPattern);
+    // ── Use SCAN (not KEYS) to find locked seats for this show ──────────────
+    const lockedLabels = await getLockedSeatsForShow(show._id.toString());
 
-    if (keys.length > 0) {
-      keys.forEach((key) => {
-        const seatLabel = key.split('seat_')[1];
+    if (lockedLabels.length > 0) {
+      lockedLabels.forEach((seatLabel) => {
         const seat = show.seats.get(seatLabel);
         if (seat && seat.status !== 'booked') {
           show.seats.set(seatLabel, { status: 'locked', category: seat.category });
@@ -102,7 +109,7 @@ const getShowById = async (req, res, next) => {
 };
 
 /**
- * @desc    Lock seats temporarily for a user (prevents double booking)
+ * @desc    Lock seats temporarily (prevents double booking)
  * @route   PATCH /api/shows/:id/lock-seats
  * @access  Private
  */
@@ -110,64 +117,94 @@ const lockSeats = async (req, res, next) => {
   try {
     const { seatLabels } = req.body;
     const showId = req.params.id;
+    const userId = req.user._id;
 
+    // ── Input validation ───────────────────────────────────────────────────
     if (!Array.isArray(seatLabels) || seatLabels.length === 0) {
       return res.status(400).json({ success: false, message: 'No seats provided' });
     }
 
+    // Deduplicate
     const uniqueSeatLabels = [...new Set(seatLabels)];
-    if (uniqueSeatLabels.length !== seatLabels.length) {
-      return res.status(400).json({ success: false, message: 'Duplicate seat labels are not allowed' });
+
+    if (uniqueSeatLabels.length > config.MAX_SEATS_PER_BOOKING) {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot lock more than ${config.MAX_SEATS_PER_BOOKING} seats per booking`,
+      });
     }
 
+    // Validate seat label format
+    const invalidLabels = uniqueSeatLabels.filter((l) => !validateSeatLabel(l));
+    if (invalidLabels.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid seat label(s): ${invalidLabels.join(', ')}`,
+      });
+    }
+
+    // ── Load show and validate seats exist ─────────────────────────────────
     const show = await Show.findById(showId);
     if (!show) {
       return res.status(404).json({ success: false, message: 'Show not found' });
     }
 
     if (!show.isActive || show.showTime <= new Date()) {
-      return res.status(400).json({ success: false, message: 'Show is not active or has already started' });
-    }
-
-    const lockedKeys = [];
-    let conflict = false;
-    const lockToken = crypto.randomUUID();
-
-    for (const label of uniqueSeatLabels) {
-      const lockKey = `lock:show_${showId}:seat_${label}`;
-      const seat = show.seats.get(label);
-      
-      if (!seat || seat.status === 'booked') {
-        conflict = true;
-        break;
-      }
-
-      const acquired = await redis.set(lockKey, lockToken, 'EX', 600, 'NX');
-      if (!acquired) {
-        conflict = true;
-        break;
-      }
-      lockedKeys.push(lockKey);
-    }
-
-    if (conflict) {
-      if (lockedKeys.length > 0) {
-        await redis.del(...lockedKeys);
-      }
-      return res.status(409).json({
+      return res.status(400).json({
         success: false,
-        message: 'One or more seats are already reserved or locked.',
+        message: 'Show is not active or has already started',
       });
     }
 
-    res.status(200).json({ success: true, message: 'Seats successfully locked', lockToken, expiresIn: 600 });
+    // Validate every requested seat exists in this show's layout
+    const invalidSeats = uniqueSeatLabels.filter((label) => !show.seats.has(label));
+    if (invalidSeats.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Seat(s) not found in this show: ${invalidSeats.join(', ')}`,
+      });
+    }
+
+    // Check that none are permanently booked
+    const alreadyBooked = uniqueSeatLabels.filter(
+      (label) => show.seats.get(label)?.status === 'booked'
+    );
+    if (alreadyBooked.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'One or more selected seats are already booked',
+      });
+    }
+
+    // ── Generate lock token and acquire Redis locks atomically ─────────────
+    const lockToken = crypto.randomUUID();
+    const { success, conflictingSeat } = await acquireSeatLocks(
+      showId,
+      uniqueSeatLabels,
+      lockToken,
+      config.SEAT_LOCK_TTL_SECONDS
+    );
+
+    if (!success) {
+      return res.status(409).json({
+        success: false,
+        message: 'One or more seats are already reserved. Please choose different seats.',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Seats successfully locked',
+      lockToken,
+      expiresIn: config.SEAT_LOCK_TTL_SECONDS,
+    });
   } catch (error) {
     next(error);
   }
 };
 
 /**
- * @desc    Release locked seats (e.g., user navigates away from checkout)
+ * @desc    Release locked seats (user navigates away from checkout)
  * @route   PATCH /api/shows/:id/release-seats
  * @access  Private
  */
@@ -180,7 +217,9 @@ const releaseSeats = async (req, res, next) => {
       return res.status(200).json({ success: true, message: 'No seats or lock token to release' });
     }
 
-    await releaseOwnedLocks(showId, seatLabels, lockToken);
+    // Validate seat labels before using in Redis key construction
+    const validLabels = seatLabels.filter(validateSeatLabel);
+    await releaseOwnedLocks(showId, validLabels, lockToken);
 
     res.status(200).json({ success: true, message: 'Seats released' });
   } catch (error) {
@@ -214,7 +253,6 @@ const createShow = async (req, res, next) => {
   try {
     const { movie, theatre, screenNumber, showTime, categoryPricing } = req.body;
 
-    // Get theatre to determine screen seat count
     const theatreDoc = await Theatre.findById(theatre);
     if (!theatreDoc) {
       return res.status(404).json({ success: false, message: 'Theatre not found' });
@@ -226,17 +264,9 @@ const createShow = async (req, res, next) => {
     }
 
     const seatMap = generateSeatMap(screen.tierConfig);
-
-    const show = await Show.create({
-      movie,
-      theatre,
-      screenNumber,
-      showTime,
-      categoryPricing,
-      seats: seatMap,
-    });
-
+    const show = await Show.create({ movie, theatre, screenNumber, showTime, categoryPricing, seats: seatMap });
     await show.populate(['movie', 'theatre']);
+
     res.status(201).json({ success: true, show });
   } catch (error) {
     next(error);
@@ -250,7 +280,7 @@ const createShow = async (req, res, next) => {
  */
 const updateShow = async (req, res, next) => {
   try {
-    // Don't allow seat map updates via this route
+    // Prevent seat map tampering via this route
     const { seats, lockedSeats, ...updateData } = req.body;
     const show = await Show.findByIdAndUpdate(req.params.id, updateData, {
       new: true,

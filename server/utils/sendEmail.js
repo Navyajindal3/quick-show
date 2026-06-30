@@ -1,21 +1,58 @@
-const { generateQRBuffer } = require('./generateQR');
+'use strict';
+
+/**
+ * Email Service
+ * =============
+ * Sends booking confirmation emails via the Resend API.
+ * Uses the QR code buffer as an inline attachment.
+ *
+ * This function throws on failure — callers (worker) should handle retries.
+ */
+
 const { Resend } = require('resend');
+const { generateQRBuffer } = require('./generateQR');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+let resendClient = null;
 
-const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, showTime, screenName, seatsList, amountPaid, bookingId, ticketToken, idempotencyKey }) => {
-  try {
-    if (!ticketToken) {
-      console.warn(`⚠️ Warning: No ticketToken provided for booking ${bookingId}`);
-    }
-    
-    // Generate the PNG buffer for the QR code
-    const qrBuffer = await generateQRBuffer(ticketToken);
-    
-    // Construct the external QR URL for email clients (which block base64)
-    const secureScanUrl = `${process.env.CLIENT_URL}/verify-ticket?token=${ticketToken}`;
+const getResend = () => {
+  if (!resendClient) {
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) throw new Error('RESEND_API_KEY is not configured');
+    resendClient = new Resend(apiKey);
+  }
+  return resendClient;
+};
 
-    const emailHtml = `<div style="font-family: Arial, sans-serif; background-color: #0A0D14; color: #FFFFFF; max-width: 600px; margin: 0 auto; border-radius: 8px; overflow: hidden;">
+const sendTicketEmail = async (
+  userEmail,
+  {
+    userName,
+    movieName,
+    theatreName,
+    showTime,
+    screenName,
+    seatsList,
+    amountPaid,
+    bookingId,
+    ticketToken,
+    idempotencyKey,
+  }
+) => {
+  if (!ticketToken) {
+    throw new Error(`No ticketToken provided for booking ${bookingId}`);
+  }
+
+  if (!userEmail) {
+    throw new Error(`No email address for booking ${bookingId}`);
+  }
+
+  const fromEmail = process.env.RESEND_FROM_EMAIL || 'noreply@quickshow.app';
+  const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+
+  // Generate the PNG buffer for the QR code
+  const qrBuffer = await generateQRBuffer(ticketToken);
+
+  const emailHtml = `<div style="font-family: Arial, sans-serif; background-color: #0A0D14; color: #FFFFFF; max-width: 600px; margin: 0 auto; border-radius: 8px; overflow: hidden;">
   <!-- Header -->
   <div style="background-color: #DC2626; padding: 20px; text-align: center;">
     <h1 style="margin: 0; color: white; font-size: 24px;">🎬 QuickShow</h1>
@@ -51,26 +88,28 @@ const sendTicketEmail = async (userEmail, { userName, movieName, theatreName, sh
   </div>
 </div>`;
 
-    await resend.emails.send({
-      from: 'onboarding@resend.dev',
-      to: userEmail,
-      subject: `Your Tickets for ${movieName}`,
-      html: emailHtml,
-      attachments: [
-        {
-          filename: 'ticket-qr.png',
-          content: qrBuffer,
-          content_id: 'quickshow-ticket'
-        }
-      ],
-      headers: idempotencyKey ? {
-        'Idempotency-Key': idempotencyKey
-      } : {}
-    });
-    console.log(`✅ Ticket email sent via Resend to ${userEmail}`);
-  } catch (error) {
-    console.error('❌ Email sending failed:', error.message || error);
+  const resend = getResend();
+
+  const result = await resend.emails.send({
+    from: fromEmail,
+    to: userEmail,
+    subject: `Your Tickets for ${movieName} — QuickShow`,
+    html: emailHtml,
+    attachments: [
+      {
+        filename: 'ticket-qr.png',
+        content: qrBuffer,
+        content_id: 'quickshow-ticket',
+      },
+    ],
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {},
+  });
+
+  if (result.error) {
+    throw new Error(`Resend API error: ${result.error.message || JSON.stringify(result.error)}`);
   }
+
+  console.log(`[email] ✅ Ticket email sent to ${userEmail.substring(0, 3)}***`);
 };
 
 module.exports = { sendTicketEmail };
